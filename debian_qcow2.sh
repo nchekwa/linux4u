@@ -152,6 +152,15 @@ virt-customize -a $FILE_PATH --install qemu-guest-agent,open-vm-tools
 
 
 
+# Fix .bashrc to enable colors and aliases
+echo "[BASHRC] Fix root .bashrc to enable colors and aliases"
+virt-customize -a $FILE_PATH \
+    --run-command "sed -i 's/^# export LS_OPTIONS=/export LS_OPTIONS=/' /root/.bashrc" \
+    --run-command "sed -i 's/^# eval /eval /' /root/.bashrc" \
+    --run-command "sed -i 's/^# alias ls=/alias ls=/' /root/.bashrc" \
+    --run-command "sed -i 's/^# alias ll=/alias ll=/' /root/.bashrc" \
+    --run-command "sed -i 's/^# alias l=/alias l=/' /root/.bashrc"
+
 # Create QuickScript folder
 virt-customize -a $FILE_PATH \
     --run-command 'mkdir -p /opt/scripts' \
