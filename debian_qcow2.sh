@@ -131,7 +131,7 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # nano - edit files by nano
 # bzip2 - allow support bzip2
 # rsync - allow synchronisation files rsync
-# openssh-server - allow support ssh
+# openssh-server - allow support ssh      -> ssh-keygen -A
 # apt-transport-https - allow support apt-transport-https
 # gpg - allow support gpg
 # htop - allow monitoring system stats by htop 
@@ -172,6 +172,11 @@ EOF' \
     --run-command 'chmod +x /opt/scripts/quick_upgrade.sh'
 echo "[    OK] /opt/scripts - created inside image"
 
+
+
+echo "[    ..] Add ssh-keygen -A to firstboot"
+virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh'
+echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox
 if [ -d "/var/lib/vz/import/" ]; then
