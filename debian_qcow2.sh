@@ -198,3 +198,7 @@ if [ -d "/var/lib/vz/import/" ]; then
 else
     echo "[    OK] No Proxmox detected - skipped copy image to proxmox /var/lib/vz/import/"
 fi
+
+echo "[    OK] Cleanup"
+rm $FILE_PATH
+exit 0
