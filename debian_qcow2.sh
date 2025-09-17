@@ -27,8 +27,10 @@ esac
 echo "Selected version: $VERSION"
 echo "URL: $URL"
 if [ -z "$FINAL_NAME" ]; then
+    FINAL_NAME="debian-${VERSION}-generic-amd64.qcow2"
     echo "Final name: $FINAL_NAME"
 else
+    FINAL_NAME="$FILE_PATH"
     echo "Final name: $FINAL_NAME"
 fi
 
@@ -39,17 +41,17 @@ if [ "$DEBUG" = "true" ]; then
 fi
 
 
-echo "[      ] Install local tools nessesery to run virt..."
+echo "[    ..] Install local tools nessesery to run virt..."
 sudo apt update -y && sudo apt install nano wget curl libguestfs-tools libvirt-login-shell 7zip -y
 
 
 
 echo "[   ISO] Download UBUNTU img if not exist"
 if [ ! -e "$FILE_PATH" ]; then
-    echo "[      ] File does not exist. Downloading..."
+    echo "[    ..] File does not exist. Downloading..."
     wget "$URL"
 else
-    echo "[      ] File already exists."
+    echo "[    OK] File already exists."
 fi
 
 
@@ -150,9 +152,10 @@ virt-customize -a $FILE_PATH --install qemu-guest-agent,open-vm-tools
 
 
 
-# Create QuickInstall script folder
-virt-customize -a $FILE_PATH --run-command 'mkdir -p /opt/scripts'
-virt-customize -a $FILE_PATH --run-command 'cat << EOF > /etc/scripts/get.sh
+# Create QuickScript folder
+virt-customize -a $FILE_PATH \
+    --run-command 'mkdir -p /opt/scripts' \
+    --run-command 'cat << EOF > /opt/scripts/download_scripts.sh
 #!/bin/bash
 wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_docker.sh -O /opt/scripts/install_docker.sh
 wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_mise.sh -O /opt/scripts/install_mise.sh
@@ -160,16 +163,24 @@ wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/
 wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_opentofu.sh -O /opt/scripts/install_opentofu.sh
 wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_pulumi.sh -O /opt/scripts/install_pulumi.sh
 chmod +x /opt/scripts/*.sh
-EOF'
-    echo "[      ] /etc/scripts/get.sh - created"
+EOF' \
+    --run-command 'chmod +x /opt/scripts/download_scripts.sh' \
+    --run-command 'cat << EOF > /opt/scripts/quick_upgrade.sh
+#!/bin/bash
+apt-get update && apt-get upgrade -y && apt-get dist-upgrade -y && apt-get autoremove -y && apt-get autoclean -y
+EOF' \
+    --run-command 'chmod +x /opt/scripts/quick_upgrade.sh'
+echo "[    OK] /opt/scripts - created inside image"
 
 
 # Check if we are on proxmox
 if [ -d "/var/lib/vz/import/" ]; then
-    echo "[      ] Copy image to proxmox"
+    echo "[    ..] Copy image to proxmox"
     cp $FILE_PATH /var/lib/vz/import/
     if [ -n "$FINAL_NAME" ]; then
         mv /var/lib/vz/import/$FILE_PATH /var/lib/vz/import/$FINAL_NAME
     fi
-    echo "[      ] Copy image to proxmox - done"
+    echo "[    OK] Copy image to proxmox - done"
+else
+    echo "[    OK] No Proxmox detected - skipped copy image to proxmox /var/lib/vz/import/"
 fi
