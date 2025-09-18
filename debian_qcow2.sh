@@ -14,6 +14,10 @@ fi
 VERSION="$1"
 
 case "$VERSION" in
+    "12")
+        FILE_PATH="debian-12-genericcloud-amd64.qcow2"
+        URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+        ;;
     "13")
         FILE_PATH="debian-13-genericcloud-amd64.qcow2"
         URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
