@@ -104,6 +104,39 @@ iface eth0 inet dhcp
 #     post-down /path/to/post-down-script.sh
 EOF'
 
+
+virt-customize -a $FILE_PATH \
+  --run-command 'cat << EOF > /opt/scripts/prepere_static_ip.sh
+#!/bin/bash
+CONFIG_FILE="/etc/network/interfaces"
+INTERFACE="eth0"
+IP_CIDR=$(ip addr show $INTERFACE | grep -oP 'inet \K[\d.]+/[\d]+')
+CURRENT_IP=$(echo $IP_CIDR | cut -d'/' -f1)
+CIDR=$(echo $IP_CIDR | cut -d'/' -f2)
+cidr_to_netmask() {
+    local cidr=$1
+    local mask=(0 0 0 0)
+    local full_octets=$((cidr / 8))
+    local partial_octet=$((cidr % 8))
+    for ((i=0; i<full_octets; i++)); do
+        mask[i]=255
+    done
+    if [ $partial_octet -gt 0 ] && [ $full_octets -lt 4 ]; then
+        mask[$full_octets]=$((256 - 2**(8-partial_octet)))
+    fi
+    echo "${mask[0]}.${mask[1]}.${mask[2]}.${mask[3]}"
+}
+NETMASK=$(cidr_to_netmask $CIDR)
+GATEWAY=$(ip route show default | grep -oP 'via \K[\d.]+' | head -1)
+sed -i "
+s|#.*address.*|#     address $CURRENT_IP|
+s|#.*netmask.*|#     netmask $NETMASK|
+s|#.*gateway.*|#     gateway $GATEWAY|
+" $CONFIG_FILE
+EOF' \
+  --run-command 'chmod +x /opt/scripts/prepere_static_ip.sh'
+
+
 echo "[   APT] Add agent to image"
 virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y'
 
@@ -190,7 +223,7 @@ echo "[    OK] /opt/scripts - created inside image"
 
 
 echo "[    ..] Add ssh-keygen -A to firstboot"
-virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh'
+virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && /opt/scripts/prepere_static_ip.sh'
 echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox
