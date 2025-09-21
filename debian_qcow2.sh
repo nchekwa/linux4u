@@ -96,12 +96,19 @@ iface eth0 inet dhcp
 #     dns-nameservers 8.8.8.8 8.8.4.4
 #     dns-search example.com
 #     mtu 1500
-#     pre-up /path/to/pre-up-script.sh
-#     up /path/to/up-script.sh
-#     post-up /path/to/post-up-script.sh
-#     pre-down /path/to/pre-down-script.sh
-#     down /path/to/down-script.sh
-#     post-down /path/to/post-down-script.sh
+#-Example of up/down scripts
+#     up /path/to/up-script.sh                  # configure IP and routes
+#     down /path/to/down-script.sh              # remove routes
+#     pre-up /path/to/pre-up-script.sh          # prepare (e.g., "sysctl net.ipv4.ip_forward=1" if needed for routing)
+#     pre-down /path/to/pre-down-script.sh      # check if safe to remove (e.g., no active connections)
+#     post-up /path/to/post-up-script.sh        # notify services (e.g., systemctl start myapp)
+#     post-down /path/to/post-down-script.sh    # clean up (stop services, etc.)
+#-Example Redirection of incoming ports
+#     post-up      iptables -t nat -A PREROUTING -i eth0 -p tcp -m multiport ! --dports 22,8006 -j DNAT --to 10.10.0.2
+#     post-down    iptables -t nat -D PREROUTING -i eth0 -p tcp -m multiport ! --dports 22,8006 -j DNAT --to 10.10.0.2
+#-Example Static Routes
+#     up ip route add 192.168.254.0/24 via 192.168.21.1 dev eth0
+#     down ip route del 192.168.254.0/24 via 192.168.21.1 dev eth0
 EOF'
 
 
@@ -166,7 +173,7 @@ virt-customize -a $FILE_PATH --install ifenslave,unzip,zip,mc,screen,gcc,make,wg
 # qemu-utils - allow support qemu
 
 echo "[   APT] Install basic tools - part 2"
-virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc
+virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc,virtiofsd
 # nano - edit files by nano
 # bzip2 - allow support bzip2
 # rsync - allow synchronisation files rsync
@@ -177,6 +184,7 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # jq - allow support jq (decode in CLI JSON)
 # yq - allow support yq (decode in CLI YAML)
 # psmisc - allow support killall command
+# virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
 
 echo "[   SSH] Set sshd to allow all"
 virt-customize -a $FILE_PATH \
