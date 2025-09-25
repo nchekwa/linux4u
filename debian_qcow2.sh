@@ -71,8 +71,8 @@ echo "[   SSH] allow root login with ssh-key only"
 virt-customize -a $FILE_PATH --run-command 'sed -i s/^#PermitRootLogin.*/PermitRootLogin\ yes/ /etc/ssh/sshd_config'
 
 
-echo "[  DISK] - increase sda disk to 100G (original is ~2.2GB)"
-qemu-img resize $FILE_PATH +98G 
+echo "[  DISK] - increase sda disk to 10G (original is ~2.2GB)"
+qemu-img resize $FILE_PATH 10G 
 echo "[  DISK] - change sda1 partition size"
 virt-customize -a $FILE_PATH --run-command "growpart /dev/sda 1 &&  resize2fs /dev/sda1"
 # virt-filesystems --long --parts --blkdevs -h -a $file_path
