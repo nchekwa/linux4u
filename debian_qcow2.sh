@@ -23,7 +23,7 @@ case "$VERSION" in
         URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
         ;;
     *)
-        echo "Invalid version. Supported versions are 20.04, 22.04 and 13."
+        echo "Invalid version. Supported versions are 12 and 13."
         exit 1
         ;;
 esac
@@ -50,7 +50,7 @@ sudo apt update -y && sudo apt install nano wget curl libguestfs-tools libvirt-l
 
 
 
-echo "[   ISO] Download UBUNTU img if not exist"
+echo "[   ISO] Download Debian img if not exist"
 if [ ! -e "$FILE_PATH" ]; then
     echo "[    ..] File does not exist. Downloading..."
     wget "$URL"
@@ -173,7 +173,7 @@ virt-customize -a $FILE_PATH --install ifenslave,unzip,zip,mc,screen,gcc,make,wg
 # qemu-utils - allow support qemu
 
 echo "[   APT] Install basic tools - part 2"
-virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc,virtiofsd
+virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc
 # nano - edit files by nano
 # bzip2 - allow support bzip2
 # rsync - allow synchronisation files rsync
@@ -184,7 +184,11 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # jq - allow support jq (decode in CLI JSON)
 # yq - allow support yq (decode in CLI YAML)
 # psmisc - allow support killall command
+
+echo "[   APT] Install basic tools - part 3"
+virt-customize -a $FILE_PATH --install virtiofsd
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
+
 
 echo "[   SSH] Set sshd to allow all"
 virt-customize -a $FILE_PATH \
