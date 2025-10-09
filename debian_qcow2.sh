@@ -235,7 +235,7 @@ echo "[    OK] /opt/scripts - created inside image"
 
 
 echo "[    ..] Add ssh-keygen -A to firstboot"
-virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && /opt/scripts/prepere_static_ip.sh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
+virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && /opt/scripts/prepere_static_ip.sh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer systemd-resolved'
 echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox
