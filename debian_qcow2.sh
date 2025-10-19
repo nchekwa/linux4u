@@ -121,7 +121,7 @@ virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y
 echo "[   APT] Uninstall some libs"
 virt-customize -a $FILE_PATH --run-command "rm -R -f /etc/cloud"
 virt-customize -a $FILE_PATH --uninstall netplan.io --uninstall cloud-init
-virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php*'
+virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
 virt-customize -a $FILE_PATH --run-command 'apt-get autoremove -y'
 virt-customize -a $FILE_PATH --run-command 'dpkg --configure -a'
 
@@ -238,7 +238,7 @@ echo "[    OK] /opt/scripts/prepere_static_ip.sh - created inside image"
 
 
 echo "[    ..] Add ssh-keygen -A to firstboot"
-virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && /opt/scripts/prepere_static_ip.sh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer systemd-resolved'
+virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && /opt/scripts/prepere_static_ip.sh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
 echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox
