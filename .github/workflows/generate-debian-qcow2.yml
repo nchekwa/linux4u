@@ -1,0 +1,39 @@
+name: Generate Debian QCOW2 image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Debian release to fetch and customize (12 or 13)"
+        required: true
+        default: "13"
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare output directory
+        run: |
+          mkdir -p files
+          rm -f files/debian-genericcloud-amd64.qcow2
+
+      - name: Build Debian QCOW2 image
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          SOURCE_FILE="debian-${VERSION}-genericcloud-amd64.qcow2"
+          TARGET_FILE="files/debian-genericcloud-amd64.qcow2"
+          sudo env KEEP_FILE=true LIBGUESTFS_BACKEND=direct ./debian_qcow2.sh "$VERSION"
+          sudo mv "$SOURCE_FILE" "$TARGET_FILE"
+          sudo chown "$USER:$USER" "$TARGET_FILE"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-genericcloud-amd64
+          path: files/debian-genericcloud-amd64.qcow2
+          if-no-files-found: error

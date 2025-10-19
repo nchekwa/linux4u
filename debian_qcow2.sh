@@ -248,11 +248,15 @@ if [ -d "/var/lib/vz/import/" ]; then
     if [ -n "$FINAL_NAME" ]; then
         mv /var/lib/vz/import/$FILE_PATH /var/lib/vz/import/$FINAL_NAME
     fi
-    echo "[    OK] Copy image to proxmox - done"
+    echo "[    OK] Copy image to proxmox /var/lib/vz/import/ - done"
 else
     echo "[    OK] No Proxmox detected - skipped copy image to proxmox /var/lib/vz/import/"
 fi
 
-echo "[    OK] Cleanup"
-rm $FILE_PATH
+if [ "$KEEP_FILE" = "true" ]; then
+    echo "[    OK] Cleanup skipped"
+else
+    echo "[    OK] Cleanup"
+    rm $FILE_PATH
+fi
 exit 0
