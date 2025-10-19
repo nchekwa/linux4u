@@ -20,6 +20,9 @@ jobs:
           mkdir -p files
           rm -f files/debian-genericcloud-amd64.qcow2
 
+      - name: Make scripts executable
+        run: chmod +x debian_qcow2.sh
+
       - name: Build Debian QCOW2 image
         env:
           VERSION: ${{ github.event.inputs.version }}
