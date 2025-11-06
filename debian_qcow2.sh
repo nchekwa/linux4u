@@ -124,7 +124,7 @@ virt-customize -a $FILE_PATH --uninstall netplan.io --uninstall cloud-init
 virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
 virt-customize -a $FILE_PATH --run-command 'apt-get autoremove -y'
 virt-customize -a $FILE_PATH --run-command 'dpkg --configure -a'
-
+virt-customize -a $FILE_PATH --run-command 'rm /etc/resolv.conf'
 
 echo "[   APT] Install basic tools"
 virt-customize -a $FILE_PATH --install ifenslave,unzip,zip,mc,screen,gcc,make,wget,curl,telnet,traceroute,tcptraceroute,sudo,gnupg,ca-certificates,nfs-common,aria2,qemu-utils
@@ -156,14 +156,14 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # psmisc - allow support killall command
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd
+virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
 
 
 echo "[   SSH] Set sshd to allow all"
 virt-customize -a $FILE_PATH \
   --run-command "sed -i '/^sshd:/d' /etc/hosts.deny; echo 'sshd: ALL' >> /etc/hosts.deny" \
-  --run-command "sed -i '/^sshd:/d' /etc/hosts.allow; echo 'sshd: 192.168.0.0/255.255.0.0,10.0.0.0/255.0.0.0,172.16.0.0/255.240.0.0' >> /etc/hosts.allow"
+  --run-command "sed -i '/^sshd:/d' /etc/hosts.allow; echo 'sshd: 10.0.0.0/8\nsshd: 172.16.0.0/12\nsshd: 192.168.0.0/16\n' >> /etc/hosts.allow"
 
 
 echo "[ GUEST] Install guest agents"
