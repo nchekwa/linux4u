@@ -7,7 +7,7 @@ FINAL_NAME="${FINAL_NAME:-$FILE_PATH}"
 
 # Check if version argument is provided
 if [ -z "$1" ]; then
-    echo "Usage: $0 <version>"
+    echo "Usage: $0 <version:12|13>"
     exit 1
 fi
 
@@ -87,8 +87,6 @@ iface lo inet loopback
 
 auto eth0
 iface eth0 inet dhcp
-
-#auto eth0
 #iface eth0 inet static
 #     address 192.168.1.100
 #     netmask 255.255.255.0
@@ -121,10 +119,10 @@ virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y
 echo "[   APT] Uninstall some libs"
 virt-customize -a $FILE_PATH --run-command "rm -R -f /etc/cloud"
 virt-customize -a $FILE_PATH --uninstall netplan.io --uninstall cloud-init
-virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
+virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php*'
 virt-customize -a $FILE_PATH --run-command 'apt-get autoremove -y'
 virt-customize -a $FILE_PATH --run-command 'dpkg --configure -a'
-virt-customize -a $FILE_PATH --run-command 'rm /etc/resolv.conf'
+
 
 echo "[   APT] Install basic tools"
 virt-customize -a $FILE_PATH --install ifenslave,unzip,zip,mc,screen,gcc,make,wget,curl,telnet,traceroute,tcptraceroute,sudo,gnupg,ca-certificates,nfs-common,aria2,qemu-utils
