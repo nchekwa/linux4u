@@ -143,6 +143,14 @@ echo "[  NMTUI] Install NetworkManager for TUI network configuration"
 virt-customize -a $FILE_PATH --install network-manager
 # network-manager - provides nmtui for easy network configuration
 
+echo "[    NM] Let NetworkManager manage ifupdown interfaces (fix 'device strictly unmanaged')"
+virt-customize -a $FILE_PATH \
+  --run-command "sed -i 's/^managed=false/managed=true/' /etc/NetworkManager/NetworkManager.conf"
+# Debian's network-manager package ships [ifupdown] managed=false, which makes NM
+# deliberately ignore interfaces known to ifupdown (e.g. eth0). That overrides
+# netplan's 'renderer: NetworkManager' and leaves eth0 'strictly unmanaged'.
+# Forcing managed=true lets netplan/NetworkManager take over the interface.
+
 
 echo "[   SSH] Set sshd to allow all"
 virt-customize -a $FILE_PATH \
