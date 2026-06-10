@@ -82,17 +82,17 @@ virt-customize -a $FILE_PATH \
   --edit '/etc/default/grub:s/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0 /' \
   --run-command 'update-grub'
 
-echo "[   NET] - make cloud-init render network via NetworkManager (so Proxmox cloud-init IP+DNS land in NM -> /etc/resolv.conf)"
+echo "[   NET] - make cloud-init render network via ifupdown (eni renderer)"
 virt-customize -a $FILE_PATH \
-  --run-command 'mkdir -p /etc/cloud/cloud.cfg.d && cat << EOF > /etc/cloud/cloud.cfg.d/99-network-manager.cfg
+  --run-command 'mkdir -p /etc/cloud/cloud.cfg.d && cat << EOF > /etc/cloud/cloud.cfg.d/99-eni.cfg
 system_info:
   network:
-    renderers: ["network-manager"]
+    renderers: ["eni"]
 EOF'
-# cloud-init by default renders via netplan -> systemd-networkd. With NetworkManager as the
-# single stack we must force the network-manager renderer, otherwise the DNS that cloud-init
-# (Proxmox datasource / DHCP) obtains never reaches /etc/resolv.conf. The renderer key is read
-# from system_info (cloudinit Distro._cfg == system_info block) - a top-level 'network:' is ignored.
+# Unify on ifupdown: force cloud-init to render to /etc/network/interfaces(.d) via the eni renderer
+# instead of netplan/network-manager. The renderer key is read from system_info (cloudinit
+# Distro._cfg == system_info block) - a top-level 'network:' is ignored. DNS is handled by
+# resolvconf (systemd-resolved removed below); see the [DNS] block.
 
 
 
@@ -102,9 +102,21 @@ virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y
 
 
 echo "[   APT] Uninstall some libs"
-virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php*'
+virt-customize -a $FILE_PATH --uninstall netplan.io
+virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
 virt-customize -a $FILE_PATH --run-command 'apt-get autoremove -y'
 virt-customize -a $FILE_PATH --run-command 'dpkg --configure -a'
+
+echo "[   DNS] Use resolvconf for /etc/resolv.conf (ifupdown/eni dns-nameservers + dhcpcd)"
+virt-customize -a $FILE_PATH --install resolvconf
+virt-customize -a $FILE_PATH --link /run/resolvconf/resolv.conf:/etc/resolv.conf
+# systemd-resolved is purged: its if-up hook (/etc/network/if-up.d/resolved) exempts the loopback
+# interface, and cloud-init's eni renderer places dns-nameservers on lo -> DNS lost. resolvconf
+# DOES capture those (verified live: "resolv.conf from lo.inet") and has no lo exemption.
+# The symlink MUST be set via --link, NOT --run-command: libguestfs swaps /etc/resolv.conf for
+# appliance networking during --run-command/--install and restores the original (the dead
+# systemd-resolved stub) afterwards, which would revert an in-guest 'ln -sf'.
+# Verified on a live VM (Proxmox-style cloud-init): /etc/resolv.conf shows the datasource nameservers.
 
 
 echo "[   APT] Install basic tools"
@@ -137,31 +149,25 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # psmisc - allow support killall command
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2
+virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whiptail,ethtool
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
+# whiptail  - required by the netui TUI (netui dies if missing)
+# ethtool   - used by netui status report (link/speed/SFP); sysfs fallback otherwise
 
 
-echo "[  NMTUI] Install NetworkManager for TUI network configuration"
-virt-customize -a $FILE_PATH --install network-manager
-# network-manager - provides nmtui for easy network configuration
-
-echo "[    NM] Let NetworkManager manage ifupdown interfaces (fix 'device strictly unmanaged')"
+echo "[ NETUI] Download netui TUI into image"
 virt-customize -a $FILE_PATH \
-  --run-command "sed -i 's/^managed=false/managed=true/' /etc/NetworkManager/NetworkManager.conf"
-# Debian's network-manager package ships [ifupdown] managed=false, which makes NM
-# deliberately ignore interfaces known to ifupdown (e.g. eth0) and can leave eth0
-# 'strictly unmanaged'. Forcing managed=true ensures NetworkManager takes over the
-# interface (cloud-init writes NM keyfiles directly via the network-manager renderer).
+  --run-command 'wget https://raw.githubusercontent.com/nchekwa/linux4u/refs/heads/main/bin/netui -O /usr/local/bin/netui && chmod 0755 /usr/local/bin/netui'
+echo "[    OK] /usr/local/bin/netui - installed"
 
 
-echo "[    NM] Mask systemd-networkd-wait-online (networkd is not the manager; avoids ~120s boot hang)"
+echo "[  WAIT] Mask systemd-networkd-wait-online (networkd is not the manager; avoids ~120s boot hang)"
 virt-customize -a $FILE_PATH --run-command 'systemctl mask systemd-networkd-wait-online.service'
 # systemd-networkd-wait-online.service is enabled by the genericcloud preset with the default
-# 120s timeout. Since networking is managed by NetworkManager (cloud-init renders NM keyfiles),
+# 120s timeout. Since networking is managed by ifupdown (cloud-init renders via the eni renderer),
 # systemd-networkd manages no links, so this waiter never sees an "online" link and blocks
 # network-online.target for the full 120s on every boot (confirmed on a live VM via
-# 'systemd-analyze blame': "2min systemd-networkd-wait-online.service"). NetworkManager-wait-online
-# already covers network-online.target for the NM-managed stack (~0.4s).
+# 'systemd-analyze blame': "2min systemd-networkd-wait-online.service").
 
 
 echo "[   SSH] Set sshd to allow all"
@@ -183,12 +189,12 @@ virt-customize -a $FILE_PATH \
 #!/bin/sh
 echo ""
 echo "  ╔════════════════════════════════════════════════════════════╗"
-echo "  ║  To configure IP address, run:                              ║"
+echo "  ║  Networking: cloud-init (Proxmox) or DHCP, via ifupdown.   ║"
 echo "  ║                                                            ║"
-echo "  ║      sudo nmtui                                            ║"
+echo "  ║  To set a STATIC IP or inspect links, run:                 ║"
+echo "  ║      sudo netui                                           ║"
 echo "  ║                                                            ║"
-echo "  ║  Or manually edit netplan:                                 ║"
-echo "  ║      sudo nano /etc/netplan/*.yaml && sudo netplan apply   ║"
+echo "  ║  Config: /etc/network/interfaces.d/                       ║"
 echo "  ╚════════════════════════════════════════════════════════════╝"
 echo ""
 EOF' \
@@ -226,8 +232,8 @@ echo "[    OK] /opt/scripts - created inside image"
 
 
 
-echo "[    ..] Add ssh-keygen -A to firstboot and enable NetworkManager"
-virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl enable NetworkManager && systemctl start NetworkManager && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
+echo "[    ..] Add ssh-keygen -A to firstboot"
+virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
 echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox

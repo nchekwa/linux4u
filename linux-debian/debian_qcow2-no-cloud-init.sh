@@ -82,32 +82,38 @@ virt-customize -a $FILE_PATH \
   --edit '/etc/default/grub:s/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0 /' \
   --run-command 'update-grub' \
   --run-command 'cat << EOF > /etc/network/interfaces
+# /etc/network/interfaces - managed via netui (run: sudo netui)
+# Per-interface config lives in /etc/network/interfaces.d/<iface>.
+# Do not declare eth0 here - it is sourced from interfaces.d (avoids duplicate stanzas).
+
 auto lo
 iface lo inet loopback
 
+source /etc/network/interfaces.d/*
+EOF'
+
+echo "[   NET] - ship netui-owned eth0 (DHCP default) + seed netui model"
+virt-customize -a $FILE_PATH \
+  --run-command 'mkdir -p /etc/network/interfaces.d /etc/network/netui/eth0' \
+  --run-command 'chmod 0750 /etc/network/netui' \
+  --run-command 'cat << EOF > /etc/network/interfaces.d/eth0
+# Managed by netui - manual edits WILL be overwritten
 auto eth0
 iface eth0 inet dhcp
-#iface eth0 inet static
-#     address 192.168.1.100
-#     netmask 255.255.255.0
-#     gateway 192.168.1.1
-#     dns-nameservers 8.8.8.8 8.8.4.4
-#     dns-search example.com
-#     mtu 1500
-#-Example of up/down scripts
-#     up /path/to/up-script.sh                  # configure IP and routes
-#     down /path/to/down-script.sh              # remove routes
-#     pre-up /path/to/pre-up-script.sh          # prepare (e.g., "sysctl net.ipv4.ip_forward=1" if needed for routing)
-#     pre-down /path/to/pre-down-script.sh      # check if safe to remove (e.g., no active connections)
-#     post-up /path/to/post-up-script.sh        # notify services (e.g., systemctl start myapp)
-#     post-down /path/to/post-down-script.sh    # clean up (stop services, etc.)
-#-Example Redirection of incoming ports
-#     post-up      iptables -t nat -A PREROUTING -i eth0 -p tcp -m multiport ! --dports 22,8006 -j DNAT --to 10.10.0.2
-#     post-down    iptables -t nat -D PREROUTING -i eth0 -p tcp -m multiport ! --dports 22,8006 -j DNAT --to 10.10.0.2
-#-Example Static Routes
-#     up ip route add 192.168.254.0/24 via 192.168.21.1 dev eth0
-#     down ip route del 192.168.254.0/24 via 192.168.21.1 dev eth0
-EOF'
+EOF' \
+  --run-command 'chmod 0640 /etc/network/interfaces.d/eth0' \
+  --run-command 'cat << EOF > /etc/network/netui/eth0/main.conf
+# netui data model for eth0 - do not edit while netui is running
+M_CLASS=auto
+M_METHOD=dhcp
+M_ADDR=
+M_NETMASK=
+M_GATEWAY=
+M_DNS=
+M_SEARCH=
+M_MTU=
+EOF' \
+  --run-command 'chmod 0640 /etc/network/netui/eth0/main.conf'
 
 
 
@@ -119,9 +125,17 @@ virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y
 echo "[   APT] Uninstall some libs"
 virt-customize -a $FILE_PATH --run-command "rm -R -f /etc/cloud"
 virt-customize -a $FILE_PATH --uninstall netplan.io --uninstall cloud-init
-virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php*'
+virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
 virt-customize -a $FILE_PATH --run-command 'apt-get autoremove -y'
 virt-customize -a $FILE_PATH --run-command 'dpkg --configure -a'
+
+echo "[   DNS] Use resolvconf for /etc/resolv.conf (ifupdown dns-nameservers + dhcpcd)"
+virt-customize -a $FILE_PATH --install resolvconf
+virt-customize -a $FILE_PATH --link /run/resolvconf/resolv.conf:/etc/resolv.conf
+# systemd-resolved is purged above. resolvconf manages /etc/resolv.conf from ifupdown dns-* options
+# and dhcpcd. The symlink MUST be set via --link, NOT --run-command: libguestfs swaps
+# /etc/resolv.conf for appliance networking during --run-command/--install and restores the
+# original afterwards, which would revert an in-guest 'ln -sf'.
 
 
 echo "[   APT] Install basic tools"
@@ -154,8 +168,10 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # psmisc - allow support killall command
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2
+virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whiptail,ethtool
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
+# whiptail  - required by the netui TUI (netui dies if missing)
+# ethtool   - used by netui status report (link/speed/SFP); sysfs fallback otherwise
 
 
 echo "[   SSH] Set sshd to allow all"
@@ -202,41 +218,35 @@ echo "[    OK] /opt/scripts - created inside image"
 
 
 
+echo "[ NETUI] Download netui TUI into image"
 virt-customize -a $FILE_PATH \
-  --run-command "cat <<'EOF' > /opt/scripts/prepere_static_ip.sh
-#!/bin/bash
-CONFIG_FILE=\"/etc/network/interfaces\"
-INTERFACE=\"eth0\"
-IP_CIDR=\$(ip addr show \$INTERFACE | grep -oP 'inet \\K[\\d.]+/[\\d]+')
-CURRENT_IP=\$(echo \$IP_CIDR | cut -d'/' -f1)
-CIDR=\$(echo \$IP_CIDR | cut -d'/' -f2)
-cidr_to_netmask() {
-    local cidr=\$1
-    local mask=(0 0 0 0)
-    local full_octets=\$((cidr / 8))
-    local partial_octet=\$((cidr % 8))
-    for ((i=0; i<full_octets; i++)); do
-        mask[i]=255
-    done
-    if [ \$partial_octet -gt 0 ] && [ \$full_octets -lt 4 ]; then
-        mask[\$full_octets]=\$((256 - 2**(8-partial_octet)))
-    fi
-    echo \"\${mask[0]}.\${mask[1]}.\${mask[2]}.\${mask[3]}\"
-}
-NETMASK=\$(cidr_to_netmask \$CIDR)
-GATEWAY=\$(ip route show default | grep -oP 'via \\K[\\d.]+' | head -1)
-sed -i \"
-s|#.*address.*|#     address \$CURRENT_IP|
-s|#.*netmask.*|#     netmask \$NETMASK|
-s|#.*gateway.*|#     gateway \$GATEWAY|
-\" \$CONFIG_FILE
-EOF" \
-  --run-command 'chmod +x /opt/scripts/prepere_static_ip.sh'
-echo "[    OK] /opt/scripts/prepere_static_ip.sh - created inside image"
+  --run-command 'wget https://raw.githubusercontent.com/nchekwa/linux4u/refs/heads/main/bin/netui -O /usr/local/bin/netui && chmod 0755 /usr/local/bin/netui'
+echo "[    OK] /usr/local/bin/netui - installed"
+
+echo "[  MOTD] Add network configuration notice"
+virt-customize -a $FILE_PATH \
+  --run-command 'mkdir -p /etc/update-motd.d' \
+  --run-command 'cat << EOF > /etc/update-motd.d/99-network-notice
+#!/bin/sh
+echo ""
+echo "  ╔════════════════════════════════════════════════════════════╗"
+echo "  ║  Networking: DHCP by default (ifupdown, eth0).             ║"
+echo "  ║                                                            ║"
+echo "  ║  To set a STATIC IP or inspect links, run:                 ║"
+echo "  ║      sudo netui                                           ║"
+echo "  ║                                                            ║"
+echo "  ║  Config: /etc/network/interfaces.d/eth0                   ║"
+echo "  ╚════════════════════════════════════════════════════════════╝"
+echo ""
+EOF' \
+  --run-command 'chmod +x /etc/update-motd.d/99-network-notice'
+
+echo "[  WAIT] Mask systemd-networkd-wait-online (networkd is not the manager; avoids latent ~120s boot hang)"
+virt-customize -a $FILE_PATH --run-command 'systemctl mask systemd-networkd-wait-online.service'
 
 
 echo "[    ..] Add ssh-keygen -A to firstboot"
-virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && /opt/scripts/prepere_static_ip.sh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
+virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
 echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox
