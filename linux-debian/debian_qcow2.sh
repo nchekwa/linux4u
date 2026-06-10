@@ -77,20 +77,22 @@ echo "[  DISK] - change sda1 partition size"
 virt-customize -a $FILE_PATH --run-command "growpart /dev/sda 1 &&  resize2fs /dev/sda1"
 # virt-filesystems --long --parts --blkdevs -h -a $file_path
 
-echo "[   NET] - set net.ifnames=0 biosdevname=0 and configure netplan for NetworkManager"
+echo "[   NET] - set net.ifnames=0 biosdevname=0"
 virt-customize -a $FILE_PATH \
   --edit '/etc/default/grub:s/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0 /' \
-  --run-command 'update-grub' \
-  --run-command 'mkdir -p /etc/netplan' \
-  --run-command 'cat << EOF > /etc/netplan/01-network-manager-all.yaml
-network:
-  version: 2
-  renderer: NetworkManager
-  ethernets:
-    eth0:
-      dhcp4: true
-EOF' \
-  --run-command 'chmod 600 /etc/netplan/*.yaml'
+  --run-command 'update-grub'
+
+echo "[   NET] - make cloud-init render network via NetworkManager (so Proxmox cloud-init IP+DNS land in NM -> /etc/resolv.conf)"
+virt-customize -a $FILE_PATH \
+  --run-command 'mkdir -p /etc/cloud/cloud.cfg.d && cat << EOF > /etc/cloud/cloud.cfg.d/99-network-manager.cfg
+system_info:
+  network:
+    renderers: ["network-manager"]
+EOF'
+# cloud-init by default renders via netplan -> systemd-networkd. With NetworkManager as the
+# single stack we must force the network-manager renderer, otherwise the DNS that cloud-init
+# (Proxmox datasource / DHCP) obtains never reaches /etc/resolv.conf. The renderer key is read
+# from system_info (cloudinit Distro._cfg == system_info block) - a top-level 'network:' is ignored.
 
 
 
@@ -147,9 +149,9 @@ echo "[    NM] Let NetworkManager manage ifupdown interfaces (fix 'device strict
 virt-customize -a $FILE_PATH \
   --run-command "sed -i 's/^managed=false/managed=true/' /etc/NetworkManager/NetworkManager.conf"
 # Debian's network-manager package ships [ifupdown] managed=false, which makes NM
-# deliberately ignore interfaces known to ifupdown (e.g. eth0). That overrides
-# netplan's 'renderer: NetworkManager' and leaves eth0 'strictly unmanaged'.
-# Forcing managed=true lets netplan/NetworkManager take over the interface.
+# deliberately ignore interfaces known to ifupdown (e.g. eth0) and can leave eth0
+# 'strictly unmanaged'. Forcing managed=true ensures NetworkManager takes over the
+# interface (cloud-init writes NM keyfiles directly via the network-manager renderer).
 
 
 echo "[   SSH] Set sshd to allow all"
@@ -215,7 +217,7 @@ echo "[    OK] /opt/scripts - created inside image"
 
 
 echo "[    ..] Add ssh-keygen -A to firstboot and enable NetworkManager"
-virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl enable NetworkManager && systemctl start NetworkManager && netplan apply && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
+virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl enable NetworkManager && systemctl start NetworkManager && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
 echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox
