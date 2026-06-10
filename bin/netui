@@ -41,6 +41,16 @@ WT() { whiptail --backtitle "$BACKTITLE" "$@" 3>&1 1>&2 2>&3; }
 
 die() { echo "E: $*" >&2; exit 1; }
 
+cidr_to_netmask() {
+    # 24 -> 255.255.255.0
+    local cidr=$1 mask=(0 0 0 0) full=$((cidr / 8)) part=$((cidr % 8)) i
+    for ((i = 0; i < full; i++)); do mask[i]=255; done
+    if [ "$part" -gt 0 ] && [ "$full" -lt 4 ]; then
+        mask[$full]=$((256 - 2 ** (8 - part)))
+    fi
+    echo "${mask[0]}.${mask[1]}.${mask[2]}.${mask[3]}"
+}
+
 # ----------------------------- sanity checks --------------------------------
 [ "$(id -u)" -eq 0 ] || die "netui requires root privileges"
 command -v whiptail >/dev/null || die "whiptail not found (apt install whiptail)"
@@ -188,6 +198,44 @@ edit_phase_lines() {
     done
 }
 
+# ----------------------------- DHCP -> static -------------------------------
+capture_live_to_static() {
+    # Freeze the interface's current (DHCP) lease into the static model so it can
+    # be persisted. Reads the live address/route and DNS from the resolvconf-managed
+    # /etc/resolv.conf. Sets M_* in place; the caller (edit_iface) lets the user
+    # review/edit every field before SAVE.
+    local ifc=$1 ipcidr ip cidr nm gw dns search
+    ipcidr=$(ip -o -4 addr show dev "$ifc" 2>/dev/null | awk '{print $4; exit}')
+    if [ -z "$ipcidr" ]; then
+        WT --title "Capture DHCP -> static" --msgbox \
+"No IPv4 address on $ifc.\n\nBring it up via DHCP first (e.g. ifup $ifc), then retry." 9 64
+        return
+    fi
+    ip=${ipcidr%/*}; cidr=${ipcidr#*/}
+    nm=$(cidr_to_netmask "$cidr")
+    gw=$(ip -4 route show default dev "$ifc" 2>/dev/null | awk '/via/{print $3; exit}')
+    dns=$(awk '/^nameserver/ && $2 !~ /^127\./ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
+    dns=${dns% }
+    search=$(awk '/^search/{$1=""; sub(/^[ \t]+/, ""); print; exit}' /etc/resolv.conf 2>/dev/null)
+    if WT --title "Capture DHCP -> static" --yesno \
+"Freeze the current lease on $ifc as a static config?
+
+  address  $ip
+  netmask  $nm
+  gateway  ${gw:-<none>}
+  dns      ${dns:-<none>}
+  search   ${search:-<none>}
+
+You can still review/edit every field before SAVE." 18 64; then
+        M_METHOD=static
+        M_ADDR=$ip
+        M_NETMASK=$nm
+        M_GATEWAY=$gw
+        M_DNS=$dns
+        M_SEARCH=$search
+    fi
+}
+
 # ----------------------------- interface editor -----------------------------
 edit_iface() {
     local ifc=$1 choice v
@@ -196,6 +244,7 @@ edit_iface() {
         choice=$(WT --title "Configure $ifc" --menu "Current settings:" 22 72 14 \
             class   "Class ............ $M_CLASS" \
             method  "Method ........... $M_METHOD" \
+            fromdhcp "Capture live DHCP lease -> static" \
             address "Address .......... ${M_ADDR:-<unset>}" \
             netmask "Netmask .......... ${M_NETMASK:-<unset>}" \
             gateway "Gateway .......... ${M_GATEWAY:-<unset>}" \
@@ -215,6 +264,7 @@ edit_iface() {
             method)
                 v=$(WT --title "Method" --menu "Address configuration:" 11 50 2 \
                     static "static" dhcp "dhcp") && M_METHOD=$v ;;
+            fromdhcp) capture_live_to_static "$ifc" ;;
             address) v=$(WT --inputbox "IP address:" 8 50 "$M_ADDR") && M_ADDR=$v ;;
             netmask) v=$(WT --inputbox "Netmask:" 8 50 "$M_NETMASK") && M_NETMASK=$v ;;
             gateway) v=$(WT --inputbox "Gateway:" 8 50 "$M_GATEWAY") && M_GATEWAY=$v ;;
