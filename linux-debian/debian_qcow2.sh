@@ -149,10 +149,11 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # psmisc - allow support killall command
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whiptail,ethtool
+virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whiptail,ethtool,cron
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
 # whiptail  - required by the netui TUI (netui dies if missing)
 # ethtool   - used by netui status report (link/speed/SFP); sysfs fallback otherwise
+# cron      - provides /etc/crontab + cron daemon (not in Debian genericcloud by default)
 
 
 echo "[ NETUI] Download netui TUI into image"
@@ -180,25 +181,6 @@ echo "[ GUEST] Install guest agents"
 virt-customize -a $FILE_PATH --install qemu-guest-agent,open-vm-tools
 # qemu-guest-agent - allow support guest agent
 # open-vm-tools - allow support vmware tools
-
-
-echo "[  MOTD] Add network configuration notice"
-virt-customize -a $FILE_PATH \
-  --run-command 'mkdir -p /etc/update-motd.d' \
-  --run-command 'cat << EOF > /etc/update-motd.d/99-network-notice
-#!/bin/sh
-echo ""
-echo "  ╔════════════════════════════════════════════════════════════╗"
-echo "  ║  Networking: cloud-init (Proxmox) or DHCP, via ifupdown.   ║"
-echo "  ║                                                            ║"
-echo "  ║  To set a STATIC IP or inspect links, run:                 ║"
-echo "  ║      sudo netui                                           ║"
-echo "  ║                                                            ║"
-echo "  ║  Config: /etc/network/interfaces.d/                       ║"
-echo "  ╚════════════════════════════════════════════════════════════╝"
-echo ""
-EOF' \
-  --run-command 'chmod +x /etc/update-motd.d/99-network-notice'
 
 
 # Fix .bashrc to enable colors and aliases
