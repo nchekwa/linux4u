@@ -154,6 +154,16 @@ virt-customize -a $FILE_PATH \
 # interface (cloud-init writes NM keyfiles directly via the network-manager renderer).
 
 
+echo "[    NM] Mask systemd-networkd-wait-online (networkd is not the manager; avoids ~120s boot hang)"
+virt-customize -a $FILE_PATH --run-command 'systemctl mask systemd-networkd-wait-online.service'
+# systemd-networkd-wait-online.service is enabled by the genericcloud preset with the default
+# 120s timeout. Since networking is managed by NetworkManager (cloud-init renders NM keyfiles),
+# systemd-networkd manages no links, so this waiter never sees an "online" link and blocks
+# network-online.target for the full 120s on every boot (confirmed on a live VM via
+# 'systemd-analyze blame': "2min systemd-networkd-wait-online.service"). NetworkManager-wait-online
+# already covers network-online.target for the NM-managed stack (~0.4s).
+
+
 echo "[   SSH] Set sshd to allow all"
 virt-customize -a $FILE_PATH \
   --run-command "sed -i '/^sshd:/d' /etc/hosts.deny; echo 'sshd: ALL' >> /etc/hosts.deny" \
