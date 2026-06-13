@@ -32,6 +32,15 @@ SELKIES_RES="${SELKIES_RES:-1920x1080}"
 # VNC viewer to 127.0.0.1:5900.
 VNC_PASSWORD="${VNC_PASSWORD:-changeme}"
 
+# Payload source: the service files and start scripts live in the repo under
+# linux-debian/selkin/ and are pulled at build time, so this builder stays a
+# single downloadable file. Pin to a tag/SHA for reproducible builds.
+LINUX4U_REF="${LINUX4U_REF:-main}"
+LINUX4U_REPO="https://raw.githubusercontent.com/nchekwa/linux4u/${LINUX4U_REF}"
+
+# Exported for envsubst when rendering the .tpl payloads on the host.
+export DESKTOP_USER SELKIES_USER SELKIES_PASSWORD SELKIES_RES
+
 # Check if version argument is provided
 if [ -z "$1" ]; then
     echo "Usage: $0 <version:12|13>"
@@ -73,7 +82,32 @@ fi
 
 
 echo "[    ..] Install local tools necessary to run virt..."
-sudo apt update -y && sudo apt install nano wget curl libguestfs-tools libvirt-login-shell 7zip -y
+sudo apt update -y && sudo apt install nano wget curl libguestfs-tools libvirt-login-shell 7zip gettext-base -y
+
+
+# -----------------------------------------------------------------------------
+# Payload fetch helpers. curl runs on the HOST (not inside the libguestfs
+# appliance) so it is unaffected by the build-time DNS swap done by the [DNS]
+# block; rendered files are injected with virt-customize --copy-in. Templated
+# payloads (.tpl) are filled with envsubst using a RESTRICTED variable list, so
+# only the named build-time vars are substituted and runtime ${HOME}/${DISPLAY}
+# are left literal.
+# -----------------------------------------------------------------------------
+BUILD_TMP="$(mktemp -d)"
+trap 'rm -rf "$BUILD_TMP"' EXIT
+
+fetch_payload() {
+  # $1 = filename in linux-debian/selkin/, $2 = output name in BUILD_TMP
+  curl -fsSL "${LINUX4U_REPO}/linux-debian/selkin/$1" -o "${BUILD_TMP}/$2" \
+    || { echo "[  FAIL] fetch payload $1"; exit 1; }
+}
+
+render_tpl() {
+  # $1 = .tpl name in linux-debian/selkin/, $2 = output in BUILD_TMP, $3 = envsubst var list
+  curl -fsSL "${LINUX4U_REPO}/linux-debian/selkin/$1" -o "${BUILD_TMP}/$1" \
+    || { echo "[  FAIL] fetch template $1"; exit 1; }
+  envsubst "$3" < "${BUILD_TMP}/$1" > "${BUILD_TMP}/$2"
+}
 
 
 echo "[   ISO] Download Debian img if not exist"
@@ -244,112 +278,31 @@ virt-customize -a $FILE_PATH \
 echo "[  DESK] Stage desktop start script (Xvfb :99 + XFCE)"
 virt-customize -a $FILE_PATH --run-command "mkdir -p /opt/selkies"
 
+render_tpl start-desktop.sh.tpl start-desktop.sh '${SELKIES_RES}'
 virt-customize -a $FILE_PATH \
-  --run-command "cat << 'EOF' > /opt/selkies/start-desktop.sh
-#!/usr/bin/env bash
-# Foundation: a headless virtual X11 display (:99) running an XFCE session.
-# Independent of any remote-access client (Selkies / VNC attach to it later).
-set -euo pipefail
-
-export DISPLAY=':99'
-export XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/tmp}\"
-RES='${SELKIES_RES}'
-
-# Virtual X11 framebuffer (no physical monitor / no GPU)
-exec_xvfb() {
-  Xvfb \"\${DISPLAY}\" -screen 0 \"\${RES}x24\" \
-    +extension COMPOSITE +extension DAMAGE +extension GLX +extension RANDR \
-    +extension RENDER +extension MIT-SHM +extension XFIXES +extension XTEST \
-    -nolisten tcp -ac -noreset >/tmp/Xvfb.log 2>&1 &
-}
-exec_xvfb
-
-echo 'Waiting for X socket'
-until [ -S \"/tmp/.X11-unix/X\${DISPLAY#*:}\" ]; do sleep 0.5; done
-echo 'X server ready'
-
-# Run the XFCE session in the FOREGROUND so systemd tracks this unit's liveness
-# by the desktop session itself (Type=simple stays active while XFCE runs).
-rm -rf \"\${HOME}/.config/xfce4\"
-exec startxfce4
-EOF" \
+  --copy-in "${BUILD_TMP}/start-desktop.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-desktop.sh"
 
 echo "[  DESK] Stage xfce-session.service"
+render_tpl xfce-session.service.tpl xfce-session.service '${DESKTOP_USER}'
 virt-customize -a $FILE_PATH \
-  --run-command "cat << EOF > /etc/systemd/system/xfce-session.service
-[Unit]
-Description=Headless XFCE desktop on Xvfb :99 (foundation for Selkies + VNC)
-After=network.target
-
-[Service]
-Type=simple
-User=${DESKTOP_USER}
-WorkingDirectory=/home/${DESKTOP_USER}
-ExecStart=/opt/selkies/start-desktop.sh
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF"
+  --copy-in "${BUILD_TMP}/xfce-session.service:/etc/systemd/system"
 
 
 # -----------------------------------------------------------------------------
 # 2) SELKIES: attaches to the existing :99 (does NOT start Xvfb/XFCE anymore).
 # -----------------------------------------------------------------------------
 echo "[SELKIE] Stage Selkies start script (attaches to :99)"
+render_tpl start-selkies.sh.tpl start-selkies.sh '${SELKIES_USER} ${SELKIES_PASSWORD}'
 virt-customize -a $FILE_PATH \
-  --run-command "cat << 'EOF' > /opt/selkies/start-selkies.sh
-#!/usr/bin/env bash
-# Selkies WebRTC stream, software x264 encoding. Attaches to the already-running
-# :99 display owned by xfce-session.service.
-set -euo pipefail
-
-export DISPLAY=':99'
-export XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/tmp}\"
-
-# Wait until the desktop's :99 socket exists (defensive; systemd ordering also covers this)
-until [ -S \"/tmp/.X11-unix/X99\" ]; do sleep 0.5; done
-
-\"\${HOME}/selkies-gstreamer/selkies-gstreamer-run\" \
-  --addr=0.0.0.0 \
-  --port=8080 \
-  --enable_https=true \
-  --https_cert=/etc/ssl/certs/ssl-cert-snakeoil.pem \
-  --https_key=/etc/ssl/private/ssl-cert-snakeoil.key \
-  --basic_auth_user='${SELKIES_USER}' \
-  --basic_auth_password='${SELKIES_PASSWORD}' \
-  --encoder=x264enc \
-  --enable_resize=false
-# enable_resize=false: Xvfb has a FIXED geometry (no RANDR modes to add).
-EOF" \
+  --copy-in "${BUILD_TMP}/start-selkies.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-selkies.sh" \
   --run-command "chown -R ${DESKTOP_USER}:${DESKTOP_USER} /opt/selkies"
 
 echo "[SELKIE] Stage selkies.service (depends on desktop)"
+render_tpl selkies.service.tpl selkies.service '${DESKTOP_USER}'
 virt-customize -a $FILE_PATH \
-  --run-command "cat << EOF > /etc/systemd/system/selkies.service
-[Unit]
-Description=Selkies X11 remote desktop stream (software x264)
-After=xfce-session.service
-Requires=xfce-session.service
-# No network-online.target dependency: this image manages networking via
-# ifupdown/eni (not systemd-networkd), so network-online.target is never
-# satisfied by a networkd waiter and would stall boot. Selkies only needs the
-# desktop (:99) to be up; the listen socket binds regardless of "online" state.
-
-[Service]
-Type=simple
-User=${DESKTOP_USER}
-WorkingDirectory=/home/${DESKTOP_USER}
-ExecStart=/opt/selkies/start-selkies.sh
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF"
+  --copy-in "${BUILD_TMP}/selkies.service:/etc/systemd/system"
 
 
 # -----------------------------------------------------------------------------
@@ -368,24 +321,9 @@ virt-customize -a $FILE_PATH \
   --run-command "chmod 600 /home/${DESKTOP_USER}/.vnc/passwd"
 
 echo "[   VNC] Stage x11vnc.service (depends on desktop, localhost-only)"
+render_tpl x11vnc.service.tpl x11vnc.service '${DESKTOP_USER}'
 virt-customize -a $FILE_PATH \
-  --run-command "cat << EOF > /etc/systemd/system/x11vnc.service
-[Unit]
-Description=x11vnc on shared Xvfb :99 (localhost only)
-After=xfce-session.service
-Requires=xfce-session.service
-
-[Service]
-Type=simple
-User=${DESKTOP_USER}
-# WAIT:99 - block until the desktop's Xvfb :99 is up, then attach
-ExecStart=/usr/bin/x11vnc -display WAIT:99 -rfbauth /home/${DESKTOP_USER}/.vnc/passwd -localhost -shared -forever -rfbport 5900
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF"
+  --copy-in "${BUILD_TMP}/x11vnc.service:/etc/systemd/system"
 
 
 # Enable all three at build time (baked-in Selkies needs no firstboot fetch).
@@ -395,8 +333,11 @@ virt-customize -a $FILE_PATH \
 
 
 echo "[ NETUI] Download netui TUI into image"
+curl -fsSL "${LINUX4U_REPO}/bin/netui" -o "${BUILD_TMP}/netui" \
+  || { echo "[  FAIL] fetch netui"; exit 1; }
 virt-customize -a $FILE_PATH \
-  --run-command 'wget https://raw.githubusercontent.com/nchekwa/linux4u/refs/heads/main/bin/netui -O /usr/local/bin/netui && chmod 0755 /usr/local/bin/netui'
+  --copy-in "${BUILD_TMP}/netui:/usr/local/bin" \
+  --run-command 'chmod 0755 /usr/local/bin/netui'
 echo "[    OK] /usr/local/bin/netui - installed"
 
 
@@ -425,12 +366,10 @@ virt-customize -a $FILE_PATH \
 
 
 # Create QuickScript folder
+fetch_payload quick_upgrade.sh quick_upgrade.sh
 virt-customize -a $FILE_PATH \
     --run-command 'mkdir -p /opt/scripts' \
-    --run-command 'cat << EOF > /opt/scripts/quick_upgrade.sh
-#!/bin/bash
-apt-get update && apt-get upgrade -y && apt-get dist-upgrade -y && apt-get autoremove -y && apt-get autoclean -y
-EOF' \
+    --copy-in "${BUILD_TMP}/quick_upgrade.sh:/opt/scripts" \
     --run-command 'chmod +x /opt/scripts/quick_upgrade.sh'
 echo "[    OK] /opt/scripts - created inside image"
 
