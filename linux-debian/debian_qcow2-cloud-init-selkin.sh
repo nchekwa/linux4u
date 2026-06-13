@@ -102,6 +102,12 @@ fetch_payload() {
     || { echo "[  FAIL] fetch payload $1"; exit 1; }
 }
 
+fetch_base() {
+  # $1 = filename in linux-debian/base/ (shared payloads), $2 = output name in BUILD_TMP
+  curl -fsSL "${LINUX4U_REPO}/linux-debian/base/$1" -o "${BUILD_TMP}/$2" \
+    || { echo "[  FAIL] fetch base $1"; exit 1; }
+}
+
 render_tpl() {
   # $1 = .tpl name in linux-debian/selkin/, $2 = output in BUILD_TMP, $3 = envsubst var list
   curl -fsSL "${LINUX4U_REPO}/linux-debian/selkin/$1" -o "${BUILD_TMP}/$1" \
@@ -144,14 +150,24 @@ virt-customize -a $FILE_PATH \
   --run-command 'update-grub'
 
 echo "[   NET] - make cloud-init render network via ifupdown (eni renderer)"
+fetch_base 99-eni.cfg 99-eni.cfg
 virt-customize -a $FILE_PATH \
-  --run-command 'mkdir -p /etc/cloud/cloud.cfg.d && cat << EOF > /etc/cloud/cloud.cfg.d/99-eni.cfg
-system_info:
-  network:
-    renderers: ["eni"]
-EOF'
+  --run-command 'mkdir -p /etc/cloud/cloud.cfg.d' \
+  --copy-in "${BUILD_TMP}/99-eni.cfg:/etc/cloud/cloud.cfg.d"
 # Unify on ifupdown: force cloud-init to render to /etc/network/interfaces(.d) via the eni renderer
 # instead of netplan/network-manager. DNS handled by resolvconf (see the [DNS] block).
+
+echo "[   NET] - pre-seed eth0 DHCP default for boots with no cloud-init datasource"
+fetch_base 50-cloud-init 50-cloud-init
+virt-customize -a $FILE_PATH \
+  --run-command 'mkdir -p /etc/network/interfaces.d' \
+  --copy-in "${BUILD_TMP}/50-cloud-init:/etc/network/interfaces.d"
+# Debian ds-identify DISABLES cloud-init when no datasource is found, and genericcloud ships no
+# static eth0 - so a VM booted WITHOUT a cloud-init drive would render nothing and eth0 would stay
+# "qdisc noop state DOWN". Pre-seeding cloud-init's own eni render path with a DHCP stanza fixes
+# this with a SINGLE file: cloud-init OVERWRITES it when a datasource is present, and leaves it
+# untouched when disabled (eth0 comes up on DHCP; dhcpcd handles IPv6 via RA). Verified on live
+# qemu/KVM VMs both WITH and WITHOUT a datasource. See docs/notes/learnings.
 
 
 echo "[   APT] Update + upgrade base image"
@@ -366,7 +382,7 @@ virt-customize -a $FILE_PATH \
 
 
 # Create QuickScript folder
-fetch_payload quick_upgrade.sh quick_upgrade.sh
+fetch_base quick_upgrade.sh quick_upgrade.sh
 virt-customize -a $FILE_PATH \
     --run-command 'mkdir -p /opt/scripts' \
     --copy-in "${BUILD_TMP}/quick_upgrade.sh:/opt/scripts" \

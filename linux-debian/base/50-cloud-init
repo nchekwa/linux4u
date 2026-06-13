@@ -1,0 +1,5 @@
+# Default network config until cloud-init renders one from a datasource.
+# cloud-init OVERWRITES this exact file when a datasource is present; when none is
+# attached (ds-identify disables cloud-init) this DHCP default stays in place.
+auto eth0
+iface eth0 inet dhcp

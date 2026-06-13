@@ -5,6 +5,11 @@ TIMEZONE="UTC"
 DEBUG="${DEBUG:-false}"
 FINAL_NAME="${FINAL_NAME:-$FILE_PATH}"
 
+# Shared payloads (linux-debian/base/) are fetched from the repo at build time, so this
+# builder stays a single downloadable file. Pin LINUX4U_REF to a tag/SHA for reproducible builds.
+LINUX4U_REF="${LINUX4U_REF:-main}"
+LINUX4U_REPO="https://raw.githubusercontent.com/nchekwa/linux4u/${LINUX4U_REF}"
+
 # Check if version argument is provided
 if [ -z "$1" ]; then
     echo "Usage: $0 <version:12|13>"
@@ -49,6 +54,20 @@ echo "[    ..] Install local tools nessesery to run virt..."
 sudo apt update -y && sudo apt install nano wget curl libguestfs-tools libvirt-login-shell 7zip -y
 
 
+# -----------------------------------------------------------------------------
+# Payload fetch helper. curl runs on the HOST (not inside the libguestfs appliance),
+# so it is unaffected by the build-time DNS swap done by the [DNS] block; fetched files
+# are injected with virt-customize --copy-in. Shared payloads live in linux-debian/base/.
+# -----------------------------------------------------------------------------
+BUILD_TMP="$(mktemp -d)"
+trap 'rm -rf "$BUILD_TMP"' EXIT
+
+fetch_base() {
+  # $1 = filename in linux-debian/base/, $2 = output name in BUILD_TMP
+  curl -fsSL "${LINUX4U_REPO}/linux-debian/base/$1" -o "${BUILD_TMP}/$2" \
+    || { echo "[  FAIL] fetch base $1"; exit 1; }
+}
+
 
 echo "[   ISO] Download Debian img if not exist"
 if [ ! -e "$FILE_PATH" ]; then
@@ -83,18 +102,31 @@ virt-customize -a $FILE_PATH \
   --run-command 'update-grub'
 
 echo "[   NET] - make cloud-init render network via ifupdown (eni renderer)"
+fetch_base 99-eni.cfg 99-eni.cfg
 virt-customize -a $FILE_PATH \
-  --run-command 'mkdir -p /etc/cloud/cloud.cfg.d && cat << EOF > /etc/cloud/cloud.cfg.d/99-eni.cfg
-system_info:
-  network:
-    renderers: ["eni"]
-EOF'
+  --run-command 'mkdir -p /etc/cloud/cloud.cfg.d' \
+  --copy-in "${BUILD_TMP}/99-eni.cfg:/etc/cloud/cloud.cfg.d"
 # Unify on ifupdown: force cloud-init to render to /etc/network/interfaces(.d) via the eni renderer
 # instead of netplan/network-manager. The renderer key is read from system_info (cloudinit
 # Distro._cfg == system_info block) - a top-level 'network:' is ignored. DNS is handled by
 # resolvconf (systemd-resolved removed below); see the [DNS] block.
 
-
+echo "[   NET] - pre-seed eth0 DHCP default for boots with no cloud-init datasource"
+fetch_base 50-cloud-init 50-cloud-init
+virt-customize -a $FILE_PATH \
+  --run-command 'mkdir -p /etc/network/interfaces.d' \
+  --copy-in "${BUILD_TMP}/50-cloud-init:/etc/network/interfaces.d"
+# Debian ds-identify DISABLES cloud-init when no datasource is found (default policy
+# notfound=disabled), and genericcloud ships no static eth0 - so a VM booted WITHOUT a
+# cloud-init drive would render nothing and eth0 would stay "qdisc noop state DOWN".
+# Pre-seeding cloud-init's own eni render path (/etc/network/interfaces.d/50-cloud-init) with a
+# plain IPv4 DHCP stanza fixes this with a SINGLE file (no extra service, no duplicate eth0
+# stanza): cloud-init OVERWRITES this file when a datasource IS present (verified: a
+# datasource-provided static IP is applied cleanly, no leftover DHCP), and leaves it untouched
+# when disabled (eth0 comes up on DHCP; dhcpcd handles IPv6 via RA). Forcing cloud-init on via
+# ds-identify notfound=enabled was rejected: it triggers ~240s EC2 IMDS probing AND cloud-init
+# hardcodes a dual-stack fallback whose 'inet6 dhcp' line fails on this dhcpcd-based image.
+# Verified on live qemu/KVM VMs both WITH and WITHOUT a datasource. See docs/notes/learnings.
 
 
 echo "[   APT] Add agent to image"
@@ -157,8 +189,11 @@ virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whip
 
 
 echo "[ NETUI] Download netui TUI into image"
+curl -fsSL "${LINUX4U_REPO}/bin/netui" -o "${BUILD_TMP}/netui" \
+  || { echo "[  FAIL] fetch netui"; exit 1; }
 virt-customize -a $FILE_PATH \
-  --run-command 'wget https://raw.githubusercontent.com/nchekwa/linux4u/refs/heads/main/bin/netui -O /usr/local/bin/netui && chmod 0755 /usr/local/bin/netui'
+  --copy-in "${BUILD_TMP}/netui:/usr/local/bin" \
+  --run-command 'chmod 0755 /usr/local/bin/netui'
 echo "[    OK] /usr/local/bin/netui - installed"
 
 
@@ -193,23 +228,13 @@ virt-customize -a $FILE_PATH \
     --run-command "sed -i 's/^# alias l=/alias l=/' /root/.bashrc"
 
 # Create QuickScript folder
+fetch_base download_scripts.sh download_scripts.sh
+fetch_base quick_upgrade.sh quick_upgrade.sh
 virt-customize -a $FILE_PATH \
     --run-command 'mkdir -p /opt/scripts' \
-    --run-command 'cat << EOF > /opt/scripts/download_scripts.sh
-#!/bin/bash
-wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_docker.sh -O /opt/scripts/install_docker.sh
-wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_mise.sh -O /opt/scripts/install_mise.sh
-wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_npm.sh -O /opt/scripts/install_npm.sh
-wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_opentofu.sh -O /opt/scripts/install_opentofu.sh
-wget https://raw.githubusercontent.com/nchekwa/vsce/refs/heads/main/src/scripts/install_pulumi.sh -O /opt/scripts/install_pulumi.sh
-chmod +x /opt/scripts/*.sh
-EOF' \
-    --run-command 'chmod +x /opt/scripts/download_scripts.sh' \
-    --run-command 'cat << EOF > /opt/scripts/quick_upgrade.sh
-#!/bin/bash
-apt-get update && apt-get upgrade -y && apt-get dist-upgrade -y && apt-get autoremove -y && apt-get autoclean -y
-EOF' \
-    --run-command 'chmod +x /opt/scripts/quick_upgrade.sh'
+    --copy-in "${BUILD_TMP}/download_scripts.sh:/opt/scripts" \
+    --copy-in "${BUILD_TMP}/quick_upgrade.sh:/opt/scripts" \
+    --run-command 'chmod +x /opt/scripts/download_scripts.sh /opt/scripts/quick_upgrade.sh'
 echo "[    OK] /opt/scripts - created inside image"
 
 
