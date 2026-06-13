@@ -31,7 +31,7 @@ esac
 echo "Selected version: $VERSION"
 echo "URL: $URL"
 if [ -z "$FINAL_NAME" ]; then
-    FINAL_NAME="debian-${VERSION}-generic-amd64.qcow2"
+    FINAL_NAME="debian-${VERSION}-generic-amd64-no-cloud-init.qcow2"
     echo "Final name: $FINAL_NAME"
 else
     FINAL_NAME="$FILE_PATH"

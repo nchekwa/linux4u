@@ -67,7 +67,7 @@ esac
 echo "Selected version: $VERSION"
 echo "URL: $URL"
 if [ -z "$FINAL_NAME" ]; then
-    FINAL_NAME="debian-${VERSION}-selkin-amd64.qcow2"
+    FINAL_NAME="debian-${VERSION}-selkin-amd64-cloud-init-selkin.qcow2"
     echo "Final name: $FINAL_NAME"
 else
     FINAL_NAME="$FILE_PATH"
