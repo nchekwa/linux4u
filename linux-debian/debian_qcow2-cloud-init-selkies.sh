@@ -1,5 +1,5 @@
 #!/bin/sh
-# debian_qcow2-selkin.sh
+# debian_qcow2-selkies.sh
 # -----------------------------------------------------------------------------
 # Builds a Debian cloud qcow2 image preloaded with:
 #   - Selkies (X11) WebRTC HTML5 remote desktop, software x264 encoding
@@ -21,8 +21,8 @@ DESKTOP_USER="${DESKTOP_USER:-user}"
 DESKTOP_PASSWORD="${DESKTOP_PASSWORD:-user}"
 
 # Selkies HTTP basic-auth credentials (web UI login)
-SELKIES_USER="${SELKIES_USER:-user}"
-SELKIES_PASSWORD="${SELKIES_PASSWORD:-changeme}"
+SELKIES_USER="${SELKIES_USER:-selkin}"
+SELKIES_PASSWORD="${SELKIES_PASSWORD:-321selkin}"
 # Streamed virtual display geometry
 SELKIES_RES="${SELKIES_RES:-1920x1080}"
 
@@ -30,10 +30,10 @@ SELKIES_RES="${SELKIES_RES:-1920x1080}"
 # x11vnc shares the SAME :99 display as Selkies, bound to localhost only.
 # Reach it via SSH tunnel:  ssh -L 5900:127.0.0.1:5900 user@VM  then connect a
 # VNC viewer to 127.0.0.1:5900.
-VNC_PASSWORD="${VNC_PASSWORD:-changeme}"
+VNC_PASSWORD="${VNC_PASSWORD:-321vnc}"
 
 # Payload source: the service files and start scripts live in the repo under
-# linux-debian/selkin/ and are pulled at build time, so this builder stays a
+# linux-debian/selkies/ and are pulled at build time, so this builder stays a
 # single downloadable file. Pin to a tag/SHA for reproducible builds.
 LINUX4U_REF="${LINUX4U_REF:-main}"
 LINUX4U_REPO="https://raw.githubusercontent.com/nchekwa/linux4u/${LINUX4U_REF}"
@@ -67,7 +67,7 @@ esac
 echo "Selected version: $VERSION"
 echo "URL: $URL"
 if [ -z "$FINAL_NAME" ]; then
-    FINAL_NAME="debian-${VERSION}-selkin-amd64-cloud-init-selkin.qcow2"
+    FINAL_NAME="debian-${VERSION}-amd64-cloud-init-selkies.qcow2"
     echo "Final name: $FINAL_NAME"
 else
     FINAL_NAME="$FILE_PATH"
@@ -97,8 +97,8 @@ BUILD_TMP="$(mktemp -d)"
 trap 'rm -rf "$BUILD_TMP"' EXIT
 
 fetch_payload() {
-  # $1 = filename in linux-debian/selkin/, $2 = output name in BUILD_TMP
-  curl -fsSL "${LINUX4U_REPO}/linux-debian/selkin/$1" -o "${BUILD_TMP}/$2" \
+  # $1 = filename in linux-debian/selkies/, $2 = output name in BUILD_TMP
+  curl -fsSL "${LINUX4U_REPO}/linux-debian/selkies/$1" -o "${BUILD_TMP}/$2" \
     || { echo "[  FAIL] fetch payload $1"; exit 1; }
 }
 
@@ -109,8 +109,8 @@ fetch_base() {
 }
 
 render_tpl() {
-  # $1 = .tpl name in linux-debian/selkin/, $2 = output in BUILD_TMP, $3 = envsubst var list
-  curl -fsSL "${LINUX4U_REPO}/linux-debian/selkin/$1" -o "${BUILD_TMP}/$1" \
+  # $1 = .tpl name in linux-debian/selkies/, $2 = output in BUILD_TMP, $3 = envsubst var list
+  curl -fsSL "${LINUX4U_REPO}/linux-debian/selkies/$1" -o "${BUILD_TMP}/$1" \
     || { echo "[  FAIL] fetch template $1"; exit 1; }
   envsubst "$3" < "${BUILD_TMP}/$1" > "${BUILD_TMP}/$2"
 }
@@ -262,17 +262,21 @@ virt-customize -a $FILE_PATH --install ssl-cert
 # -----------------------------------------------------------------------------
 # DESKTOP USER: Selkies must run as a non-root user with an active X session.
 # -----------------------------------------------------------------------------
-echo "[  USER] Create desktop user '${DESKTOP_USER}' (sudo, no root login for desktop)"
+echo "[  USER] Create desktop user '${DESKTOP_USER}' (passwordless sudo, no root login for desktop)"
 virt-customize -a $FILE_PATH \
   --run-command "useradd -m -s /bin/bash ${DESKTOP_USER} || true" \
+  --run-command "cp -n /etc/skel/.bashrc /etc/skel/.profile /etc/skel/.bash_logout /home/${DESKTOP_USER}/ 2>/dev/null || true" \
   --run-command "echo '${DESKTOP_USER}:${DESKTOP_PASSWORD}' | chpasswd" \
   --run-command "usermod -aG sudo ${DESKTOP_USER}" \
+  --run-command "echo '${DESKTOP_USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/${DESKTOP_USER} && chmod 0440 /etc/sudoers.d/${DESKTOP_USER}" \
   --run-command "usermod -aG ssl-cert ${DESKTOP_USER}" \
   --run-command "chown -R ${DESKTOP_USER}:${DESKTOP_USER} /home/${DESKTOP_USER}"
 # chown covers the Selkies tree baked in earlier (it was unpacked before the
 # user existed, so it is root-owned until now).
 # ssl-cert group membership: the snakeoil private key is mode 0640 root:ssl-cert,
 # so the non-root Selkies user needs this group to read it for HTTPS.
+# NOPASSWD sudoers drop-in (/etc/sudoers.d/${DESKTOP_USER}, mode 0440): the desktop
+# user runs sudo without being prompted for a password.
 
 
 # =============================================================================
@@ -342,6 +346,15 @@ virt-customize -a $FILE_PATH \
   --copy-in "${BUILD_TMP}/x11vnc.service:/etc/systemd/system"
 
 
+echo "[  MOTD] Stage live login banner (/etc/update-motd.d/99-motd-update)"
+render_tpl 99-motd-update.tpl 99-motd-update '${DESKTOP_USER} ${SELKIES_USER}'
+virt-customize -a $FILE_PATH \
+  --copy-in "${BUILD_TMP}/99-motd-update:/etc/update-motd.d" \
+  --run-command "chmod 0755 /etc/update-motd.d/99-motd-update"
+# Live MOTD: pam_motd runs /etc/update-motd.d/* on each login and caches to
+# /run/motd.dynamic, so the IP is resolved fresh per login. Named motd-update.
+
+
 # Enable all three at build time (baked-in Selkies needs no firstboot fetch).
 echo "[   SVC] Enable desktop + selkies + x11vnc services"
 virt-customize -a $FILE_PATH \
@@ -371,22 +384,31 @@ echo "[ GUEST] Install guest agents"
 virt-customize -a $FILE_PATH --install qemu-guest-agent,open-vm-tools
 
 
-# Fix root .bashrc to enable colors and aliases
-echo "[BASHRC] Fix root .bashrc to enable colors and aliases"
+# Fix .bashrc to enable colors and aliases (root + desktop user).
+# NOTE: the /etc/skel .bashrc (seeded for ${DESKTOP_USER}) differs from root's:
+# 'ls --color' is already active in the dircolors block, so for the user we only
+# enable the colored prompt and the ll/la/l aliases (skel uses '#alias', no space).
+echo "[BASHRC] Fix root + ${DESKTOP_USER} .bashrc to enable colors and aliases"
 virt-customize -a $FILE_PATH \
     --run-command "sed -i 's/^# export LS_OPTIONS=/export LS_OPTIONS=/' /root/.bashrc" \
     --run-command "sed -i 's/^# eval /eval /' /root/.bashrc" \
     --run-command "sed -i 's/^# alias ls=/alias ls=/' /root/.bashrc" \
     --run-command "sed -i 's/^# alias ll=/alias ll=/' /root/.bashrc" \
-    --run-command "sed -i 's/^# alias l=/alias l=/' /root/.bashrc"
+    --run-command "sed -i 's/^# alias l=/alias l=/' /root/.bashrc" \
+    --run-command "sed -i 's/^#force_color_prompt=yes/force_color_prompt=yes/' /home/${DESKTOP_USER}/.bashrc" \
+    --run-command "sed -i 's/^#alias ll=/alias ll=/' /home/${DESKTOP_USER}/.bashrc" \
+    --run-command "sed -i 's/^#alias la=/alias la=/' /home/${DESKTOP_USER}/.bashrc" \
+    --run-command "sed -i 's/^#alias l=/alias l=/' /home/${DESKTOP_USER}/.bashrc"
 
 
 # Create QuickScript folder
+fetch_base download_scripts.sh download_scripts.sh
 fetch_base quick_upgrade.sh quick_upgrade.sh
 virt-customize -a $FILE_PATH \
     --run-command 'mkdir -p /opt/scripts' \
+    --copy-in "${BUILD_TMP}/download_scripts.sh:/opt/scripts" \
     --copy-in "${BUILD_TMP}/quick_upgrade.sh:/opt/scripts" \
-    --run-command 'chmod +x /opt/scripts/quick_upgrade.sh'
+    --run-command 'chmod +x /opt/scripts/download_scripts.sh /opt/scripts/quick_upgrade.sh'
 echo "[    OK] /opt/scripts - created inside image"
 
 
