@@ -101,6 +101,6 @@ Gotchas worth remembering:
 
 ## References
 
-- `linux-debian/debian_qcow2-cloud-init.sh` and `debian_qcow2-cloud-init-selkin.sh` (pre-seed `50-cloud-init` block)
+- `linux-debian/debian_qcow2-cloud-init.sh` and `debian_qcow2-cloud-init-selkies.sh` (pre-seed `50-cloud-init` block)
 - Binding rule: `docs/notes/devops.md` → "Network — eth0 DHCP default when cloud-init has no datasource"
 - Related: [[1781049600-cloud-init-eni-resolvconf-dns-debian]], [[1781052000-networkd-wait-online-120s-boot-hang]]

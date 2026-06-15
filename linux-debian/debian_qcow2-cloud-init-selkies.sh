@@ -33,8 +33,8 @@ else
 fi
 
 # Selkies HTTP basic-auth credentials (web UI login)
-SELKIES_USER="${SELKIES_USER:-selkin}"
-SELKIES_PASSWORD="${SELKIES_PASSWORD:-321selkin}"
+SELKIES_USER="${SELKIES_USER:-selkies}"
+SELKIES_PASSWORD="${SELKIES_PASSWORD:-321selkies}"
 # Streamed virtual display geometry
 SELKIES_RES="${SELKIES_RES:-1920x1080}"
 

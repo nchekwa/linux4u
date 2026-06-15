@@ -1,13 +1,13 @@
 ---
 title: Externalizing builder payloads without breaking single-file distribution
 date: 2026-06-13
-tags: [devops, libguestfs, virt-customize, envsubst, selkin]
+tags: [devops, libguestfs, virt-customize, envsubst, selkies]
 severity: medium
 ---
 
 ## Problem
 
-`debian_qcow2-selkin.sh` embedded its systemd units and start scripts as inline
+`debian_qcow2-cloud-init-selkies.sh` embedded its systemd units and start scripts as inline
 `cat << EOF` heredocs. Because the heredocs sat inside double-quoted
 `--run-command "..."` strings, every runtime shell variable had to be escaped
 (`\${DISPLAY}`, `\${HOME}`, `\"`). The result was unlintable, no syntax
@@ -28,7 +28,7 @@ fail to resolve names (see devops.md Network/DNS rule).
 
 ## Solution
 
-Keep payloads as real files in `linux-debian/selkin/`; the single-file builder
+Keep payloads as real files in `linux-debian/selkies/`; the single-file builder
 pulls them at build time and injects them with `--copy-in`:
 
 - **`curl` on the HOST**, not in-guest. Host networking is unaffected by the
@@ -47,7 +47,7 @@ pulls them at build time and injects them with `--copy-in`:
 - **Reproducibility:** the raw base `LINUX4U_REPO` is pinned to `LINUX4U_REF`
   (default `main`); set it to a tag/SHA for a reproducible build. Otherwise the
   image is a function of whatever is on `main` at build time. The vars are
-  repo-scoped (raw root), so the `linux-debian/selkin/` subpath is appended in
+  repo-scoped (raw root), so the `linux-debian/selkies/` subpath is appended in
   the fetch helpers. `netui` uses the same base (`${LINUX4U_REPO}/bin/netui`),
   fetched host-side + `--copy-in` instead of the old in-guest `wget`.
 - Robust fetch in `sh` (no `pipefail`): `curl -fsSL ... -o tmpfile || exit 1`
@@ -60,6 +60,6 @@ escaping pain — extracting it would add a network fetch for nothing.
 
 ## References
 
-- `linux-debian/debian_qcow2-selkin.sh` (helpers `fetch_payload` / `render_tpl`)
-- `linux-debian/selkin/*.tpl`, `linux-debian/selkin/quick_upgrade.sh`
-- devops.md: "Selkin image — externalized payloads", "Network / DNS — image build"
+- `linux-debian/debian_qcow2-cloud-init-selkies.sh` (helpers `fetch_payload` / `render_tpl`)
+- `linux-debian/selkies/*.tpl`, `linux-debian/selkies/quick_upgrade.sh`
+- devops.md: "Selkies image — externalized payloads", "Network / DNS — image build"

@@ -15,9 +15,12 @@ set -u
 BACKTITLE="deskui - selkies + vnc TUI"
 SELKIES_UNIT="selkies.service"
 VNC_UNIT="x11vnc.service"
-SELKIES_UNIT_FILE="/etc/systemd/system/selkies.service"
-SELKIES_WRAPPER="/usr/local/bin/start-selkies.sh"
-VNC_PASSWD="/root/.vnc/passwd"
+SELKIES_WRAPPER="/opt/selkies/start-selkies.sh"
+VNC_UNIT_FILE="/etc/systemd/system/x11vnc.service"
+# VNC password file path is read from the x11vnc unit (-rfbauth ...) so deskui
+# follows the build-time DESKTOP_USER (e.g. /home/user/.vnc/passwd), not /root.
+VNC_PASSWD=$(grep -oP '(?<=-rfbauth )[^ ]+' "$VNC_UNIT_FILE" 2>/dev/null | head -1)
+VNC_PASSWD="${VNC_PASSWD:-/root/.vnc/passwd}"
 
 die() { echo "E: $*" >&2; exit 1; }
 
@@ -66,17 +69,17 @@ systemctl_menu() {
 
 # ---- selkies: credential management ----
 
-selkies_get_user() { grep -oP '(?<=--basic_auth_user=)[^ ]+' "$SELKIES_WRAPPER" 2>/dev/null | head -1; }
+selkies_get_user() { grep -oP '(?<=--basic_auth_user=)[^ ]+' "$SELKIES_WRAPPER" 2>/dev/null | head -1 | tr -d "'"; }
 
 selkies_change_user() {
     local cur new
     cur=$(selkies_get_user)
-    new=$(DLG --cancel-label "Back" --title "Selkies login" --inputbox "New login (basic-auth):" 9 60 "${cur:-root}") || return
+    new=$(DLG --cancel-label "Back" --title "Selkies login" --inputbox "New login (basic-auth):" 9 60 "${cur:-selkies}") || return
     if ! valid_token "$new"; then
         DLG --title "Error" --msgbox "Invalid login. Allowed chars: A-Z a-z 0-9 . _ @ % + : -" 9 60
         return
     fi
-    sed -i "s/--basic_auth_user=[^ ]*/--basic_auth_user=${new}/" "$SELKIES_WRAPPER" \
+    sed -i "s/--basic_auth_user=[^ ]*/--basic_auth_user='${new}'/" "$SELKIES_WRAPPER" \
         || { DLG --title "Error" --msgbox "Failed to write $SELKIES_WRAPPER" 9 60; return; }
     run_show "restart $SELKIES_UNIT" systemctl restart "$SELKIES_UNIT"
     DLG --title "Selkies login" --msgbox "Login changed to: ${new}\nService restarted." 9 60
@@ -89,12 +92,11 @@ selkies_change_pass() {
         DLG --title "Error" --msgbox "Invalid password. Allowed chars: A-Z a-z 0-9 . _ @ % + : -" 9 60
         return
     fi
-    # password lives in the unit as Environment=SELKIES_PW= ; unit change needs daemon-reload
-    sed -i "s|^Environment=SELKIES_PW=.*|Environment=SELKIES_PW=${new}|" "$SELKIES_UNIT_FILE" \
-        || { DLG --title "Error" --msgbox "Failed to write $SELKIES_UNIT_FILE" 9 64; return; }
-    systemctl daemon-reload
+    # password lives in the wrapper as --basic_auth_password='...' (not a unit change, no daemon-reload)
+    sed -i "s/--basic_auth_password=[^ ]*/--basic_auth_password='${new}'/" "$SELKIES_WRAPPER" \
+        || { DLG --title "Error" --msgbox "Failed to write $SELKIES_WRAPPER" 9 60; return; }
     run_show "restart $SELKIES_UNIT" systemctl restart "$SELKIES_UNIT"
-    DLG --title "Selkies password" --msgbox "Password changed.\ndaemon-reload + restart done." 9 60
+    DLG --title "Selkies password" --msgbox "Password changed.\nService restarted." 9 60
 }
 
 selkies_menu() {
