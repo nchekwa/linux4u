@@ -231,7 +231,7 @@ echo "[   APT] Install basic tools - part 2"
 virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,dialog,ethtool,cron
+virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whiptail,ethtool,cron
 
 
 # -----------------------------------------------------------------------------
@@ -439,14 +439,6 @@ virt-customize -a $FILE_PATH \
   --copy-in "${BUILD_TMP}/netui:/usr/local/bin" \
   --run-command 'chmod 0755 /usr/local/bin/netui'
 echo "[    OK] /usr/local/bin/netui - installed"
-
-echo "[DESKUI] Download deskui TUI into image"
-curl -fsSL "${LINUX4U_REPO}/bin/deskui" -o "${BUILD_TMP}/deskui" \
-  || { echo "[  FAIL] fetch deskui"; exit 1; }
-virt-customize -a $FILE_PATH \
-  --copy-in "${BUILD_TMP}/deskui:/usr/local/bin" \
-  --run-command 'chmod 0755 /usr/local/bin/deskui'
-echo "[    OK] /usr/local/bin/deskui - installed"
 
 
 echo "[  WAIT] Mask systemd-networkd-wait-online (networkd is not the manager)"

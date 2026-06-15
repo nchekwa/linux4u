@@ -1,28 +1,27 @@
 #!/bin/bash
 # =============================================================================
-# netui - minimal whiptail TUI for ifupdown management
+# netui - minimal dialog TUI for ifupdown management
 #
 # Design principles:
-#   * /etc/network/interfaces is NEVER touched by this tool. It must contain
-#     "source /etc/network/interfaces.d/*" (the tool verifies and can add it
-#     once, with explicit user confirmation).
-#   * Each managed interface lives in /etc/network/interfaces.d/<iface>,
-#     a file fully OWNED by netui and regenerated from the data model on save.
-#     Manual edits of the main file (comments, lo, exotic stanzas) survive
-#     by design, because the tool never parses or rewrites them.
-#   * Data model: /etc/network/netui/<iface>/main.conf  (key=value)
-#                 /etc/network/netui/<iface>/{pre-up,up,down,post-down}.lines
-#                 (one shell command per line, emitted verbatim into stanza)
+#   * /etc/network/interfaces is NEVER touched by this tool except once: to add
+#     "source /etc/network/interfaces.d/*" (with explicit user confirmation).
+#   * Each managed interface lives in /etc/network/interfaces.d/<iface>. That
+#     file IS the single source of truth. netui parses it into memory, edits in
+#     memory, and renders back. No shadow data model, no /etc/network/netui
+#     directory, no .bak files.
+#   * Unknown options (bridge_ports, vlan_raw_device, hwaddress, ...) and any
+#     trailing stanzas (e.g. inet6) are preserved VERBATIM and re-emitted, so
+#     nothing the user wrote by hand is lost on save.
 #   * Save path: render -> validate with `ifup --no-act --force -i <tmp>`
 #                -> atomic install.
-#   * Apply path: schedule an automatic rollback (systemd-run transient timer)
-#                 BEFORE ifdown/ifup, cancel it only after the user confirms
-#                 connectivity. Protects against remote lockout.
+#   * Apply path: schedule an automatic rollback (systemd-run transient timer
+#     restoring a /tmp/netui-rollback-<iface> copy) BEFORE ifdown/ifup, cancel
+#     it only after the user confirms connectivity. Protects against lockout.
 #   * Hook scripts: manage /etc/network/if-{pre-up,up,down,post-down}.d
-#                 (post-up / pre-down dirs are aliases and are NOT processed
-#                 by ifupdown - see interfaces(5)). Enable/disable via exec
-#                 bit, because run-parts skips non-executable files.
-#                 Names must match ^[a-zA-Z0-9_-]+$ (run-parts skips dots).
+#     (post-up / pre-down dirs are aliases and are NOT processed by ifupdown -
+#     see interfaces(5)). Enable/disable via exec bit, because run-parts skips
+#     non-executable files. Names must match ^[a-zA-Z0-9_-]+$ (run-parts skips
+#     dots).
 # =============================================================================
 
 set -u
@@ -30,93 +29,139 @@ set -u
 # ----------------------------- configuration --------------------------------
 ENI_MAIN=/etc/network/interfaces
 ENI_DIR=/etc/network/interfaces.d
-MODEL_DIR=/etc/network/netui
 HOOK_BASE=/etc/network
-HOOK_DIRS=(if-pre-up.d if-up.d if-down.d if-post-down.d)
-PHASES=(pre-up up down post-down)
 ROLLBACK_DELAY=90        # seconds before automatic revert after apply
 BACKTITLE="netui - ifupdown TUI"
 
-WT() { whiptail --backtitle "$BACKTITLE" "$@" 3>&1 1>&2 2>&3; }
+DLG() { dialog --backtitle "$BACKTITLE" "$@" 3>&1 1>&2 2>&3; }
 
 die() { echo "E: $*" >&2; exit 1; }
 
 cidr_to_netmask() {
     # 24 -> 255.255.255.0
-    local cidr=$1 mask=(0 0 0 0) full=$((cidr / 8)) part=$((cidr % 8)) i
+    local cidr=$1
+    local -a mask=(0 0 0 0)
+    local full=$((cidr / 8)) part=$((cidr % 8)) i
     for ((i = 0; i < full; i++)); do mask[i]=255; done
     if [ "$part" -gt 0 ] && [ "$full" -lt 4 ]; then
-        mask[$full]=$((256 - 2 ** (8 - part)))
+        mask[full]=$((256 - 2 ** (8 - part)))
     fi
     echo "${mask[0]}.${mask[1]}.${mask[2]}.${mask[3]}"
 }
 
 # ----------------------------- sanity checks --------------------------------
 [ "$(id -u)" -eq 0 ] || die "netui requires root privileges"
-command -v whiptail >/dev/null || die "whiptail not found (apt install whiptail)"
-command -v ifup     >/dev/null || die "ifupdown not installed"
+command -v dialog  >/dev/null || die "dialog not found (apt install dialog)"
+command -v ifup    >/dev/null || die "ifupdown not installed"
 
-mkdir -p "$ENI_DIR" "$MODEL_DIR"
-chmod 0750 "$MODEL_DIR"
+mkdir -p "$ENI_DIR"
 
 ensure_source_line() {
     # Main file must pull in interfaces.d; ask before the one and only
     # modification of the main file this tool may ever perform.
     if ! grep -Eq '^\s*source(-directory)?\s+(/etc/network/)?interfaces\.d' "$ENI_MAIN"; then
-        if WT --title "Setup" --yesno \
+        if DLG --title "Setup" --yesno \
 "$ENI_MAIN does not source $ENI_DIR.\n\nAppend this line?\n\n  source /etc/network/interfaces.d/*" 12 60; then
             cp -a "$ENI_MAIN" "$ENI_MAIN.netui-orig.$(date +%Y%m%d%H%M%S)"
             printf '\n# Added by netui\nsource /etc/network/interfaces.d/*\n' >> "$ENI_MAIN"
         else
-            WT --msgbox "Without the source line, files in $ENI_DIR are ignored by ifupdown. Aborting." 9 60
+            DLG --msgbox "Without the source line, files in $ENI_DIR are ignored by ifupdown. Aborting." 9 60
             exit 1
         fi
     fi
 }
 
-# ----------------------------- data model -----------------------------------
-# Model variables (loaded/saved per interface):
+# ----------------------------- in-memory model ------------------------------
+# Globals (reset by model_defaults / parse_iface for each interface):
 #   M_CLASS  : auto | allow-hotplug | manual
-#   M_METHOD : static | dhcp
+#   M_METHOD : static | dhcp | (verbatim passthrough of anything else)
 #   M_ADDR M_NETMASK M_GATEWAY M_DNS M_SEARCH M_MTU : strings (may be empty)
-# Phase lines are kept in plain files, one command per line.
+#   PRE_UP UP DOWN POST_DOWN : arrays of phase commands
+#   UNKNOWN  : verbatim lines preserved as-is (unknown options, in-stanza
+#              comments, trailing stanzas like inet6)
+
+M_CLASS=manual
+M_METHOD=dhcp
+M_ADDR="" M_NETMASK="" M_GATEWAY="" M_DNS="" M_SEARCH="" M_MTU=""
+PRE_UP=()
+UP=()
+DOWN=()
+POST_DOWN=()
+UNKNOWN=()
 
 model_defaults() {
-    M_CLASS=auto M_METHOD=static
-    M_ADDR= M_NETMASK= M_GATEWAY= M_DNS= M_SEARCH= M_MTU=
+    M_CLASS=auto
+    M_METHOD=dhcp
+    M_ADDR="" M_NETMASK="" M_GATEWAY="" M_DNS="" M_SEARCH="" M_MTU=""
+    PRE_UP=()
+    UP=()
+    DOWN=()
+    POST_DOWN=()
+    UNKNOWN=()
 }
 
-model_load() {
-    local ifc=$1 f="$MODEL_DIR/$1/main.conf"
+# parse_iface <name> -- read $ENI_DIR/<name> into the globals above.
+# A non-existent file leaves the defaults (new interface).
+parse_iface() {
+    local ifc=$1
+    local f="$ENI_DIR/$ifc" line stripped in_stanza=0
     model_defaults
-    # shellcheck disable=SC1090
-    [ -f "$f" ] && . "$f"
+    [ -f "$f" ] || return 0
+    M_CLASS=manual    # real file: absence of auto/allow-hotplug line = manual
+    while IFS= read -r line || [ -n "$line" ]; do
+        stripped=${line#"${line%%[![:space:]]*}"}
+        [ -z "$stripped" ] && continue
+        # File-level comments/blanks before any stanza are dropped (we emit our
+        # own managed header). Comments INSIDE a stanza are preserved verbatim.
+        if [ $in_stanza -eq 0 ] && [ "${stripped:0:1}" = "#" ]; then
+            continue
+        fi
+        case "$stripped" in
+            auto\ *)
+                [[ " ${stripped#auto } " == *" $ifc "* ]] && M_CLASS=auto
+                continue ;;
+            allow-hotplug\ *)
+                [[ " ${stripped#allow-hotplug } " == *" $ifc "* ]] && M_CLASS=allow-hotplug
+                continue ;;
+            iface\ *)
+                if [ $in_stanza -eq 0 ]; then
+                    in_stanza=1
+                    M_METHOD=$(awk '{print $4}' <<<"$stripped")
+                    [ -z "$M_METHOD" ] && M_METHOD=dhcp
+                else
+                    # hit a second stanza (e.g. inet6) - preserve the rest raw
+                    in_stanza=2
+                    UNKNOWN+=("$line")
+                fi
+                continue ;;
+        esac
+        [ $in_stanza -ge 1 ] || continue
+        # Once inside a trailing (non-inet4) stanza, keep everything verbatim.
+        if [ $in_stanza -eq 2 ]; then
+            UNKNOWN+=("$line")
+            continue
+        fi
+        case "$stripped" in
+            address\ *)         M_ADDR=${stripped#address } ;;
+            netmask\ *)         M_NETMASK=${stripped#netmask } ;;
+            gateway\ *)         M_GATEWAY=${stripped#gateway } ;;
+            dns-nameservers\ *) M_DNS=${stripped#dns-nameservers } ;;
+            dns-search\ *)      M_SEARCH=${stripped#dns-search } ;;
+            mtu\ *)             M_MTU=${stripped#mtu } ;;
+            pre-up\ *)          PRE_UP+=("${stripped#pre-up }") ;;
+            up\ *)              UP+=("${stripped#up }") ;;
+            down\ *)            DOWN+=("${stripped#down }") ;;
+            post-down\ *)       POST_DOWN+=("${stripped#post-down }") ;;
+            *)                  UNKNOWN+=("$line") ;;
+        esac
+    done < "$f"
 }
-
-model_save() {
-    local ifc=$1 d="$MODEL_DIR/$1"
-    mkdir -p "$d"
-    cat > "$d/main.conf" <<EOF
-# netui data model for $ifc - do not edit while netui is running
-M_CLASS='$M_CLASS'
-M_METHOD='$M_METHOD'
-M_ADDR='$M_ADDR'
-M_NETMASK='$M_NETMASK'
-M_GATEWAY='$M_GATEWAY'
-M_DNS='$M_DNS'
-M_SEARCH='$M_SEARCH'
-M_MTU='$M_MTU'
-EOF
-    chmod 0640 "$d/main.conf"
-}
-
-phase_file() { echo "$MODEL_DIR/$1/$2.lines"; }
 
 # ----------------------------- rendering ------------------------------------
 render_stanza() {
-    # Render the complete interfaces.d/<iface> content from the model to stdout.
-    local ifc=$1 p f line
-    echo "# Managed by netui - manual edits WILL be overwritten"
+    # Render the complete interfaces.d/<iface> content from memory to stdout.
+    local ifc=$1 i
+    echo "# Managed by netui - manual edits will be overwritten"
     [ "$M_CLASS" != manual ] && echo "$M_CLASS $ifc"
     echo "iface $ifc inet $M_METHOD"
     if [ "$M_METHOD" = static ]; then
@@ -127,13 +172,13 @@ render_stanza() {
     [ -n "$M_DNS" ]    && echo "    dns-nameservers $M_DNS"
     [ -n "$M_SEARCH" ] && echo "    dns-search $M_SEARCH"
     [ -n "$M_MTU" ]    && echo "    mtu $M_MTU"
-    for p in "${PHASES[@]}"; do
-        f=$(phase_file "$ifc" "$p")
-        [ -f "$f" ] || continue
-        while IFS= read -r line; do
-            [ -n "$line" ] && echo "    $p $line"
-        done < "$f"
-    done
+    for i in "${PRE_UP[@]}";    do echo "    pre-up $i"; done
+    for i in "${UP[@]}";        do echo "    up $i"; done
+    for i in "${DOWN[@]}";      do echo "    down $i"; done
+    for i in "${POST_DOWN[@]}"; do echo "    post-down $i"; done
+    # Preserved verbatim (original indentation kept): unknown options,
+    # in-stanza comments, and any trailing stanza (e.g. inet6).
+    for i in "${UNKNOWN[@]}"; do echo "$i"; done
 }
 
 validate_and_install() {
@@ -141,57 +186,52 @@ validate_and_install() {
     local ifc=$1 tmp out rc
     tmp=$(mktemp /tmp/netui.XXXXXX)
     render_stanza "$ifc" > "$tmp"
-    # --no-act parses and simulates; --force ignores current ifstate
     out=$(ifup --no-act --force -i "$tmp" "$ifc" 2>&1); rc=$?
     if [ $rc -ne 0 ]; then
-        WT --title "Validation failed" --msgbox "ifup --no-act rejected the config:\n\n$out" 16 70
+        DLG --title "Validation failed" --msgbox "ifup --no-act rejected the config:\n\n$out" 16 70
         rm -f "$tmp"
         return 1
     fi
-    # Keep a pre-change backup for the apply/rollback path
-    [ -f "$ENI_DIR/$ifc" ] && cp -a "$ENI_DIR/$ifc" "$MODEL_DIR/$ifc/rollback"
     install -m 0640 "$tmp" "$ENI_DIR/$ifc"
     rm -f "$tmp"
-    WT --title "Saved" --msgbox "Written: $ENI_DIR/$ifc\n\nValidation: OK\nUse 'Apply' to activate (ifdown/ifup with rollback)." 11 60
+    DLG --title "Saved" --msgbox "Written: $ENI_DIR/$ifc\n\nValidation: OK\nUse 'Apply' to activate (ifdown/ifup with rollback)." 11 60
 }
 
 # ----------------------------- phase line editor ----------------------------
+# edit_phase_lines <iface> <phase-label> <array-varname>
+# Edits the named global array in place (bash nameref). No file I/O.
 edit_phase_lines() {
-    local ifc=$1 phase=$2 f n i line choice
-    f=$(phase_file "$ifc" "$phase")
-    mkdir -p "$MODEL_DIR/$ifc"; touch "$f"
+    local ifc=$1 phase=$2
+    local -n __pl=$3
+    local choice idx action newline
     while true; do
-        local -a items=() lines=()
-        mapfile -t lines < "$f"
-        n=0
-        for line in "${lines[@]}"; do
-            [ -n "$line" ] || continue
-            items+=("$n" "$line"); n=$((n+1))
+        local -a items=()
+        for idx in "${!__pl[@]}"; do
+            items+=("$idx" "${__pl[$idx]}")
         done
         items+=(add "[ add new line ]" back "[ back ]")
-        choice=$(WT --title "$ifc: '$phase' lines" \
+        choice=$(DLG --no-ok --cancel-label "Back" --title "$ifc: '$phase' lines" \
             --menu "Commands emitted as:  $phase <cmd>" 20 74 10 "${items[@]}") || return
         case $choice in
             back) return ;;
             add)
-                line=$(WT --title "New '$phase' command" --inputbox \
+                newline=$(DLG --cancel-label "Back" --title "New '$phase' command" --inputbox \
                     "Shell command (e.g. iptables-restore /etc/network/rc.firewall):" 9 70 "") || continue
-                [ -n "$line" ] && echo "$line" >> "$f"
+                [ -n "$newline" ] && __pl+=("$newline")
                 ;;
             *)
-                local action
-                action=$(WT --title "Line: ${lines[$choice]}" --menu "Action:" 12 60 3 \
+                action=$(DLG --no-ok --cancel-label "Back" --title "Line: ${__pl[$choice]}" --menu "Action:" 12 60 3 \
                     edit "Edit" delete "Delete" back "Back") || continue
                 case $action in
                     edit)
-                        line=$(WT --inputbox "Edit command:" 9 70 "${lines[$choice]}") || continue
-                        lines[$choice]=$line
-                        printf '%s\n' "${lines[@]}" > "$f"
+                        newline=$(DLG --cancel-label "Back" --inputbox "Edit command:" 9 70 "${__pl[$choice]}") || continue
+                        __pl[choice]=$newline
                         ;;
                     delete)
-                        unset 'lines[choice]'
-                        printf '%s\n' "${lines[@]}" > "$f"
+                        unset '__pl[choice]'
+                        __pl=("${__pl[@]}")   # re-index to keep menu ids contiguous
                         ;;
+                    back) ;;
                 esac
                 ;;
         esac
@@ -201,13 +241,13 @@ edit_phase_lines() {
 # ----------------------------- DHCP -> static -------------------------------
 capture_live_to_static() {
     # Freeze the interface's current (DHCP) lease into the static model so it can
-    # be persisted. Reads the live address/route and DNS from the resolvconf-managed
-    # /etc/resolv.conf. Sets M_* in place; the caller (edit_iface) lets the user
-    # review/edit every field before SAVE.
+    # be persisted. Reads the live address/route and DNS from the resolvconf-
+    # managed /etc/resolv.conf. Sets M_* in place; the caller (edit_iface) lets
+    # the user review/edit every field before SAVE.
     local ifc=$1 ipcidr ip cidr nm gw dns search
     ipcidr=$(ip -o -4 addr show dev "$ifc" 2>/dev/null | awk '{print $4; exit}')
     if [ -z "$ipcidr" ]; then
-        WT --title "Capture DHCP -> static" --msgbox \
+        DLG --title "Capture DHCP -> static" --msgbox \
 "No IPv4 address on $ifc.\n\nBring it up via DHCP first (e.g. ifup $ifc), then retry." 9 64
         return
     fi
@@ -217,7 +257,7 @@ capture_live_to_static() {
     dns=$(awk '/^nameserver/ && $2 !~ /^127\./ {printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)
     dns=${dns% }
     search=$(awk '/^search/{$1=""; sub(/^[ \t]+/, ""); print; exit}' /etc/resolv.conf 2>/dev/null)
-    if WT --title "Capture DHCP -> static" --yesno \
+    if DLG --title "Capture DHCP -> static" --yesno \
 "Freeze the current lease on $ifc as a static config?
 
   address  $ip
@@ -238,10 +278,10 @@ You can still review/edit every field before SAVE." 18 64; then
 
 # ----------------------------- interface editor -----------------------------
 edit_iface() {
-    local ifc=$1 choice v
-    model_load "$ifc"
+    local ifc=$1 choice v ph
+    parse_iface "$ifc"
     while true; do
-        choice=$(WT --title "Configure $ifc" --menu "Current settings:" 22 72 14 \
+        choice=$(DLG --no-ok --cancel-label "Back" --title "Configure $ifc" --menu "Current settings:" 22 72 14 \
             class   "Class ............ $M_CLASS" \
             method  "Method ........... $M_METHOD" \
             fromdhcp "Capture live DHCP lease -> static" \
@@ -257,32 +297,40 @@ edit_iface() {
             back    "Back (discard unsaved)") || return
         case $choice in
             class)
-                v=$(WT --title "Class" --menu "How is $ifc brought up?" 12 60 3 \
+                v=$(DLG --no-ok --cancel-label "Back" --title "Class" --menu "How is $ifc brought up?" 12 60 3 \
                     auto "auto (at boot, ifup -a)" \
                     allow-hotplug "allow-hotplug (udev event)" \
                     manual "manual (no auto line)") && M_CLASS=$v ;;
             method)
-                v=$(WT --title "Method" --menu "Address configuration:" 11 50 2 \
+                v=$(DLG --no-ok --cancel-label "Back" --title "Method" --menu "Address configuration:" 11 50 2 \
                     static "static" dhcp "dhcp") && M_METHOD=$v ;;
             fromdhcp) capture_live_to_static "$ifc" ;;
-            address) v=$(WT --inputbox "IP address:" 8 50 "$M_ADDR") && M_ADDR=$v ;;
-            netmask) v=$(WT --inputbox "Netmask:" 8 50 "$M_NETMASK") && M_NETMASK=$v ;;
-            gateway) v=$(WT --inputbox "Gateway:" 8 50 "$M_GATEWAY") && M_GATEWAY=$v ;;
-            dns)     v=$(WT --inputbox "DNS servers (space separated):" 8 60 "$M_DNS") && M_DNS=$v ;;
-            search)  v=$(WT --inputbox "DNS search domain(s):" 8 60 "$M_SEARCH") && M_SEARCH=$v ;;
-            mtu)     v=$(WT --inputbox "MTU (empty = driver default):" 8 50 "$M_MTU") && M_MTU=$v ;;
+            address) v=$(DLG --cancel-label "Back" --inputbox "IP address:" 8 50 "$M_ADDR") && M_ADDR=$v ;;
+            netmask) v=$(DLG --cancel-label "Back" --inputbox "Netmask:" 8 50 "$M_NETMASK") && M_NETMASK=$v ;;
+            gateway) v=$(DLG --cancel-label "Back" --inputbox "Gateway:" 8 50 "$M_GATEWAY") && M_GATEWAY=$v ;;
+            dns)     v=$(DLG --cancel-label "Back" --inputbox "DNS servers (space separated):" 8 60 "$M_DNS") && M_DNS=$v ;;
+            search)  v=$(DLG --cancel-label "Back" --inputbox "DNS search domain(s):" 8 60 "$M_SEARCH") && M_SEARCH=$v ;;
+            mtu)     v=$(DLG --cancel-label "Back" --inputbox "MTU (empty = driver default):" 8 50 "$M_MTU") && M_MTU=$v ;;
             hooks)
-                v=$(WT --title "$ifc hooks" --menu "Phase:" 13 60 4 \
+                ph=$(DLG --no-ok --cancel-label "Back" --title "$ifc hooks" --menu "Phase:" 13 60 4 \
                     pre-up "pre-up lines" up "up lines" \
-                    down "down lines" post-down "post-down lines") \
-                    && edit_phase_lines "$ifc" "$v" ;;
+                    down "down lines" post-down "post-down lines") || continue
+                case $ph in
+                    pre-up)     edit_phase_lines "$ifc" "pre-up"     PRE_UP ;;
+                    up)         edit_phase_lines "$ifc" "up"         UP ;;
+                    down)       edit_phase_lines "$ifc" "down"       DOWN ;;
+                    post-down)  edit_phase_lines "$ifc" "post-down" POST_DOWN ;;
+                esac ;;
             preview)
                 local tmp; tmp=$(mktemp)
                 render_stanza "$ifc" > "$tmp"
-                WT --title "Preview: $ENI_DIR/$ifc" --textbox "$tmp" 20 74 --scrolltext
+                if [ "${#UNKNOWN[@]}" -gt 0 ]; then
+                    DLG --title "Preview" --msgbox \
+                        "${#UNKNOWN[@]} unknown line(s) preserved verbatim (shown in the stanza below)." 8 64
+                fi
+                DLG --title "Preview: $ENI_DIR/$ifc" --exit-label "Back" --textbox "$tmp" 20 74 --scrolltext
                 rm -f "$tmp" ;;
             save)
-                model_save "$ifc"
                 validate_and_install "$ifc" ;;
             back) return ;;
         esac
@@ -290,35 +338,38 @@ edit_iface() {
 }
 
 select_iface() {
-    # Offer kernel interfaces (minus lo) plus anything already modelled.
-    local -a items=()
-    local i
+    # Offer kernel interfaces (minus lo) plus any existing config file.
+    local -a items=() seen=()
+    local i j found
     for i in /sys/class/net/*; do
         i=${i##*/}
         [ "$i" = lo ] && continue
         items+=("$i" "kernel interface")
+        seen+=("$i")
     done
-    for i in "$MODEL_DIR"/*/; do
-        [ -d "$i" ] || continue
-        i=${i%/}; i=${i##*/}
-        [ -e "/sys/class/net/$i" ] || items+=("$i" "configured (not present)")
+    for i in "$ENI_DIR"/*; do
+        [ -f "$i" ] || continue
+        i=${i##*/}
+        found=0
+        for j in "${seen[@]}"; do [ "$j" = "$i" ] && { found=1; break; }; done
+        [ $found -eq 0 ] && items+=("$i" "config file (no device)")
     done
     items+=(other "[ type a name manually ]")
     local c
-    c=$(WT --title "Interfaces" --menu "Select interface:" 18 60 8 "${items[@]}") || return 1
+    c=$(DLG --no-ok --cancel-label "Back" --title "Interfaces" --menu "Select interface:" 18 60 10 "${items[@]}") || return 1
     if [ "$c" = other ]; then
-        c=$(WT --inputbox "Interface name:" 8 40 "") || return 1
+        c=$(DLG --cancel-label "Back" --inputbox "Interface name:" 8 40 "") || return 1
     fi
     echo "$c"
 }
 
 # ----------------------------- apply + rollback -----------------------------
 apply_iface() {
-    local ifc rc out unit
+    local ifc rc out unit rb
     ifc=$(select_iface) || return
-    [ -f "$ENI_DIR/$ifc" ] || { WT --msgbox "No saved config for $ifc. Save first." 8 50; return; }
+    [ -f "$ENI_DIR/$ifc" ] || { DLG --msgbox "No saved config for $ifc. Save first." 8 50; return; }
 
-    WT --title "Apply $ifc" --yesno \
+    DLG --title "Apply $ifc" --yesno \
 "This will run:  ifdown --force $ifc && ifup $ifc
 
 A rollback timer will restore the previous config and re-run
@@ -327,29 +378,30 @@ ifdown/ifup automatically in $ROLLBACK_DELAY s unless you confirm.
 Proceed?" 13 64 || return
 
     unit="netui-rollback-$ifc"
+    rb="/tmp/netui-rollback-$ifc"
     systemctl stop "$unit.timer" "$unit.service" 2>/dev/null
 
-    if [ -f "$MODEL_DIR/$ifc/rollback" ] && command -v systemd-run >/dev/null; then
-        # Restore previous stanza and bounce the interface if not cancelled in time
+    if command -v systemd-run >/dev/null; then
+        cp -a "$ENI_DIR/$ifc" "$rb"
         systemd-run --on-active="$ROLLBACK_DELAY" --unit="$unit" --quiet \
-            /bin/sh -c "cp '$MODEL_DIR/$ifc/rollback' '$ENI_DIR/$ifc'; ifdown --force '$ifc'; ifup '$ifc'" \
-            || WT --msgbox "WARNING: could not schedule rollback timer. Applying WITHOUT a safety net." 9 60
+            /bin/sh -c "cp '$rb' '$ENI_DIR/$ifc'; ifdown --force '$ifc'; ifup '$ifc'; rm -f '$rb'" \
+            || DLG --msgbox "WARNING: could not schedule rollback timer. Applying WITHOUT a safety net." 9 60
     else
-        WT --msgbox "WARNING: no previous config or no systemd-run - applying WITHOUT rollback." 9 60
+        DLG --msgbox "WARNING: no systemd-run - applying WITHOUT rollback." 9 60
     fi
 
     out=$( { ifdown --force "$ifc"; ifup "$ifc"; } 2>&1 ); rc=$?
 
-    if WT --title "Apply result (rc=$rc)" --yesno \
+    if DLG --title "Apply result (rc=$rc)" --yesno \
 "$out
 
 Connection still alive? KEEP the new configuration?
 (Choosing 'No' or letting the timer expire reverts it.)" 18 70; then
         systemctl stop "$unit.timer" "$unit.service" 2>/dev/null
-        rm -f "$MODEL_DIR/$ifc/rollback"
-        WT --msgbox "New configuration kept. Rollback cancelled." 8 50
+        rm -f "$rb"
+        DLG --msgbox "New configuration kept. Rollback cancelled." 8 50
     else
-        WT --msgbox "Rollback stays armed - previous config will be restored in <= $ROLLBACK_DELAY s." 8 64
+        DLG --msgbox "Rollback stays armed - previous config will be restored in <= $ROLLBACK_DELAY s." 8 64
     fi
 }
 
@@ -391,15 +443,15 @@ status_report() {
             done
         fi
     } > "$tmp" 2>&1
-    WT --title "Status: $ifc" --textbox "$tmp" 24 78 --scrolltext
+    DLG --title "Status: $ifc" --exit-label "Back" --textbox "$tmp" 24 78 --scrolltext
     rm -f "$tmp"
 }
 
 # ----------------------------- hook dir manager -----------------------------
 hooks_menu() {
-    local dir choice path
+    local dir choice
     while true; do
-        dir=$(WT --title "Hook directories" --menu \
+        dir=$(DLG --no-ok --cancel-label "Back" --title "Hook directories" --menu \
 "Scripts run by run-parts for EVERY interface.
 Filter inside the script via \$IFACE / \$MODE / \$PHASE env vars." 16 64 4 \
             if-pre-up.d "before interface is configured" \
@@ -421,7 +473,7 @@ hook_dir_menu() {
             items+=("$name" "$mark")
         done
         items+=(new "[ create new hook script ]" back "[ back ]")
-        choice=$(WT --title "$dir" --menu "Hook scripts:" 20 70 10 "${items[@]}") || return
+        choice=$(DLG --no-ok --cancel-label "Back" --title "$dir" --menu "Hook scripts:" 20 70 10 "${items[@]}") || return
         case $choice in
             back) return ;;
             new)  hook_new "$dir" ;;
@@ -432,14 +484,14 @@ hook_dir_menu() {
 
 hook_new() {
     local dir=$1 name
-    name=$(WT --inputbox \
+    name=$(DLG --cancel-label "Back" --inputbox \
 "Script name - MUST match ^[a-zA-Z0-9_-]+\$
 (run-parts silently skips names with dots, e.g. *.sh):" 10 64 "") || return
     if ! printf '%s' "$name" | grep -Eq '^[a-zA-Z0-9_-]+$'; then
-        WT --msgbox "Invalid name. Allowed: letters, digits, underscore, hyphen." 8 60
+        DLG --msgbox "Invalid name. Allowed: letters, digits, underscore, hyphen." 8 60
         return
     fi
-    [ -e "$dir/$name" ] && { WT --msgbox "File already exists." 7 40; return; }
+    [ -e "$dir/$name" ] && { DLG --msgbox "File already exists." 7 40; return; }
     cat > "$dir/$name" <<'EOF'
 #!/bin/sh
 # Hook script managed via netui.
@@ -452,22 +504,22 @@ hook_new() {
 # --- your commands below ---
 EOF
     chmod 0755 "$dir/$name"
-    WT --msgbox "Created and enabled: $dir/$name\nEdit it to add your commands." 9 60
+    DLG --msgbox "Created and enabled: $dir/$name\nEdit it to add your commands." 9 60
 }
 
 hook_action() {
     local path=$1 choice
-    choice=$(WT --title "${path##*/}" --menu "Action:" 14 60 5 \
+    choice=$(DLG --no-ok --cancel-label "Back" --title "${path##*/}" --menu "Action:" 14 60 5 \
         view "View content" \
         toggle "Enable/disable (exec bit)" \
         edit "Edit in \$EDITOR" \
         delete "Delete" \
         back "Back") || return
     case $choice in
-        view)   WT --textbox "$path" 20 74 --scrolltext ;;
+        view)   DLG --exit-label "Back" --textbox "$path" 20 74 --scrolltext ;;
         toggle) if [ -x "$path" ]; then chmod a-x "$path"; else chmod a+x "$path"; fi ;;
         edit)   "${EDITOR:-nano}" "$path" ;;
-        delete) WT --yesno "Really delete $path?" 8 60 && rm -f "$path" ;;
+        delete) DLG --yesno "Really delete $path?" 8 60 && rm -f "$path" ;;
         back)   ;;
     esac
 }
@@ -476,7 +528,7 @@ hook_action() {
 ensure_source_line
 
 while true; do
-    CH=$(WT --title "Main menu" --menu "Select:" 17 64 7 \
+    CH=$(DLG --no-ok --cancel-label "Exit" --title "Main menu" --menu "Select:" 17 64 7 \
         iface "Configure an interface" \
         status "Interface status report (link/speed/SFP)" \
         apply "Apply configuration (ifdown/ifup + rollback)" \
@@ -488,7 +540,7 @@ while true; do
         status) status_report ;;
         apply) apply_iface ;;
         hooks) hooks_menu ;;
-        show)  WT --textbox "$ENI_MAIN" 20 74 --scrolltext ;;
+        show)  DLG --exit-label "Back" --textbox "$ENI_MAIN" 20 74 --scrolltext ;;
         quit)  exit 0 ;;
     esac
 done

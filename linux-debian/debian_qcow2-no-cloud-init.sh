@@ -111,28 +111,15 @@ iface lo inet loopback
 source /etc/network/interfaces.d/*
 EOF'
 
-echo "[   NET] - ship netui-owned eth0 (DHCP default) + seed netui model"
+echo "[   NET] - ship netui-managed eth0 (DHCP default)"
 virt-customize -a $FILE_PATH \
-  --run-command 'mkdir -p /etc/network/interfaces.d /etc/network/netui/eth0' \
-  --run-command 'chmod 0750 /etc/network/netui' \
+  --run-command 'mkdir -p /etc/network/interfaces.d' \
   --run-command 'cat << EOF > /etc/network/interfaces.d/eth0
-# Managed by netui - manual edits WILL be overwritten
+# Managed by netui - manual edits will be overwritten
 auto eth0
 iface eth0 inet dhcp
 EOF' \
-  --run-command 'chmod 0640 /etc/network/interfaces.d/eth0' \
-  --run-command 'cat << EOF > /etc/network/netui/eth0/main.conf
-# netui data model for eth0 - do not edit while netui is running
-M_CLASS=auto
-M_METHOD=dhcp
-M_ADDR=
-M_NETMASK=
-M_GATEWAY=
-M_DNS=
-M_SEARCH=
-M_MTU=
-EOF' \
-  --run-command 'chmod 0640 /etc/network/netui/eth0/main.conf'
+  --run-command 'chmod 0640 /etc/network/interfaces.d/eth0'
 
 
 
@@ -187,9 +174,9 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # psmisc - allow support killall command
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whiptail,ethtool,cron
+virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,dialog,ethtool,cron
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
-# whiptail  - required by the netui TUI (netui dies if missing)
+# dialog  - required by the netui TUI (netui dies if missing)
 # ethtool   - used by netui status report (link/speed/SFP); sysfs fallback otherwise
 # cron      - provides /etc/crontab + cron daemon (not in Debian genericcloud by default)
 

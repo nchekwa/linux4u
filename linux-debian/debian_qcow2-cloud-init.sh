@@ -181,9 +181,9 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # psmisc - allow support killall command
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,whiptail,ethtool,cron
+virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,dialog,ethtool,cron
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
-# whiptail  - required by the netui TUI (netui dies if missing)
+# dialog  - required by the netui TUI (netui dies if missing)
 # ethtool   - used by netui status report (link/speed/SFP); sysfs fallback otherwise
 # cron      - provides /etc/crontab + cron daemon (not in Debian genericcloud by default)
 

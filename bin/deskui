@@ -1,0 +1,155 @@
+#!/bin/bash
+#
+# deskui - dialog(1) TUI to manage the root desktop-access services
+#          (selkies WebRTC + x11vnc) installed by setup-root-desktop-selkies-vnc.sh
+#
+# Two submenus: selkies / vnc. Each exposes systemctl management; selkies also
+# lets you change the basic-auth login + password, vnc the connection password.
+#
+# Menus have no OK button: press Enter to activate the highlighted entry. The
+# single button is "Exit" on the main menu and "Back" in every submenu.
+#
+set -u
+
+# ---- config / discovery ----
+BACKTITLE="deskui - selkies + vnc TUI"
+SELKIES_UNIT="selkies.service"
+VNC_UNIT="x11vnc.service"
+SELKIES_UNIT_FILE="/etc/systemd/system/selkies.service"
+SELKIES_WRAPPER="/usr/local/bin/start-selkies.sh"
+VNC_PASSWD="/root/.vnc/passwd"
+
+die() { echo "E: $*" >&2; exit 1; }
+
+DLG() { dialog --backtitle "$BACKTITLE" "$@" 3>&1 1>&2 2>&3; }
+
+# token charset accepted for login / selkies password (avoids sed/systemd/shell quoting traps)
+valid_token() { [[ $1 =~ ^[A-Za-z0-9._@%+:-]+$ ]]; }
+
+# ---- generic helpers ----
+
+# run_show TITLE CMD...  -> run a command, show stdout+stderr+exit code in a scrollable textbox
+run_show() {
+    local title=$1; shift
+    local tmp rc
+    tmp=$(mktemp /tmp/deskui.XXXXXX)
+    { printf '$ %s\n\n' "$*"; } >"$tmp"
+    "$@" >>"$tmp" 2>&1; rc=$?
+    { printf '\n[exit %s]\n' "$rc"; } >>"$tmp"
+    DLG --title "$title" --exit-label "Back" --textbox "$tmp" 22 78
+    rm -f "$tmp"
+}
+
+# systemctl submenu, shared by both services
+systemctl_menu() {
+    local unit=$1 ch
+    while true; do
+        ch=$(DLG --no-ok --cancel-label "Back" --title "systemctl: $unit" --menu "Action:" 16 60 7 \
+            status  "Show status" \
+            start   "Start" \
+            stop    "Stop" \
+            restart "Restart" \
+            enable  "Enable at boot" \
+            disable "Disable at boot" \
+            logs    "Show logs (journalctl)") || return
+        case $ch in
+            status)  run_show "status $unit"  systemctl --no-pager status "$unit" ;;
+            start)   run_show "start $unit"   systemctl start "$unit" ;;
+            stop)    run_show "stop $unit"    systemctl stop "$unit" ;;
+            restart) run_show "restart $unit" systemctl restart "$unit" ;;
+            enable)  run_show "enable $unit"  systemctl enable "$unit" ;;
+            disable) run_show "disable $unit" systemctl disable "$unit" ;;
+            logs)    run_show "logs $unit"    journalctl -u "$unit" -n 120 --no-pager ;;
+        esac
+    done
+}
+
+# ---- selkies: credential management ----
+
+selkies_get_user() { grep -oP '(?<=--basic_auth_user=)[^ ]+' "$SELKIES_WRAPPER" 2>/dev/null | head -1; }
+
+selkies_change_user() {
+    local cur new
+    cur=$(selkies_get_user)
+    new=$(DLG --cancel-label "Back" --title "Selkies login" --inputbox "New login (basic-auth):" 9 60 "${cur:-root}") || return
+    if ! valid_token "$new"; then
+        DLG --title "Error" --msgbox "Invalid login. Allowed chars: A-Z a-z 0-9 . _ @ % + : -" 9 60
+        return
+    fi
+    sed -i "s/--basic_auth_user=[^ ]*/--basic_auth_user=${new}/" "$SELKIES_WRAPPER" \
+        || { DLG --title "Error" --msgbox "Failed to write $SELKIES_WRAPPER" 9 60; return; }
+    run_show "restart $SELKIES_UNIT" systemctl restart "$SELKIES_UNIT"
+    DLG --title "Selkies login" --msgbox "Login changed to: ${new}\nService restarted." 9 60
+}
+
+selkies_change_pass() {
+    local new
+    new=$(DLG --cancel-label "Back" --insecure --title "Selkies password" --passwordbox "New password (basic-auth):" 9 60) || return
+    if ! valid_token "$new"; then
+        DLG --title "Error" --msgbox "Invalid password. Allowed chars: A-Z a-z 0-9 . _ @ % + : -" 9 60
+        return
+    fi
+    # password lives in the unit as Environment=SELKIES_PW= ; unit change needs daemon-reload
+    sed -i "s|^Environment=SELKIES_PW=.*|Environment=SELKIES_PW=${new}|" "$SELKIES_UNIT_FILE" \
+        || { DLG --title "Error" --msgbox "Failed to write $SELKIES_UNIT_FILE" 9 64; return; }
+    systemctl daemon-reload
+    run_show "restart $SELKIES_UNIT" systemctl restart "$SELKIES_UNIT"
+    DLG --title "Selkies password" --msgbox "Password changed.\ndaemon-reload + restart done." 9 60
+}
+
+selkies_menu() {
+    local ch
+    while true; do
+        ch=$(DLG --no-ok --cancel-label "Back" --title "Selkies (WebRTC :8080)" --menu "Login: $(selkies_get_user)" 14 64 3 \
+            systemctl "Manage service (systemctl)" \
+            user      "Change login (basic-auth)" \
+            password  "Change password (basic-auth)") || return
+        case $ch in
+            systemctl) systemctl_menu "$SELKIES_UNIT" ;;
+            user)      selkies_change_user ;;
+            password)  selkies_change_pass ;;
+        esac
+    done
+}
+
+# ---- vnc: password management (classic x11vnc, no login) ----
+
+vnc_change_pass() {
+    local new
+    new=$(DLG --cancel-label "Back" --insecure --title "VNC password" --passwordbox "New VNC password (max 8 chars):" 9 60) || return
+    [ -n "$new" ] || { DLG --title "Error" --msgbox "Password cannot be empty." 8 50; return; }
+    mkdir -p "$(dirname "$VNC_PASSWD")"
+    if x11vnc -storepasswd "$new" "$VNC_PASSWD" >/dev/null 2>&1; then
+        run_show "restart $VNC_UNIT" systemctl restart "$VNC_UNIT"
+        DLG --title "VNC password" --msgbox "VNC password changed.\nService restarted.\n(VNC truncates the password to 8 chars.)" 10 60
+    else
+        DLG --title "Error" --msgbox "x11vnc -storepasswd failed." 8 56
+    fi
+}
+
+vnc_menu() {
+    local ch
+    while true; do
+        ch=$(DLG --no-ok --cancel-label "Back" --title "VNC (x11vnc :5900)" --menu "Action:" 12 60 2 \
+            systemctl "Manage service (systemctl)" \
+            password  "Change VNC password") || return
+        case $ch in
+            systemctl) systemctl_menu "$VNC_UNIT" ;;
+            password)  vnc_change_pass ;;
+        esac
+    done
+}
+
+# ---- main ----
+[ "$(id -u)" -eq 0 ] || die "run as root"
+command -v dialog >/dev/null 2>&1 || die "dialog not found (apt-get install dialog)"
+
+while true; do
+    CH=$(DLG --no-ok --cancel-label "Exit" --title "deskui" --menu "Select a service:" 12 56 2 \
+        selkies "Selkies WebRTC (web :8080)" \
+        vnc     "VNC (x11vnc :5900)") || exit 0
+    case $CH in
+        selkies) selkies_menu ;;
+        vnc)     vnc_menu ;;
+    esac
+done
