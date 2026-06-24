@@ -3,8 +3,6 @@
 ROOT_PASSWORD="root"
 TIMEZONE="UTC"
 DEBUG="${DEBUG:-false}"
-FINAL_NAME="${FINAL_NAME:-$FILE_PATH}"
-
 # Shared payloads (linux-debian/base/) are fetched from the repo at build time, so this
 # builder stays a single downloadable file. Pin LINUX4U_REF to a tag/SHA for reproducible builds.
 LINUX4U_REF="${LINUX4U_REF:-main}"
@@ -35,13 +33,10 @@ esac
 
 echo "Selected version: $VERSION"
 echo "URL: $URL"
-if [ -z "$FINAL_NAME" ]; then
+if [ -z "${FINAL_NAME:-}" ]; then
     FINAL_NAME="debian-${VERSION}-generic-amd64-cloud-init.qcow2"
-    echo "Final name: $FINAL_NAME"
-else
-    FINAL_NAME="$FILE_PATH"
-    echo "Final name: $FINAL_NAME"
 fi
+echo "Final name: $FINAL_NAME"
 
 
 # ### Set Debug in case of troubelshooting
@@ -72,38 +67,38 @@ fetch_base() {
 echo "[   ISO] Download Debian img if not exist"
 if [ ! -e "$FILE_PATH" ]; then
     echo "[    ..] File does not exist. Downloading..."
-    wget "$URL"
+    wget -O "$FILE_PATH" "$URL" || { echo "[  FAIL] download failed"; rm -f "$FILE_PATH"; exit 1; }
 else
     echo "[    OK] File already exists."
 fi
 
 
 echo "[    TZ] set timezone UTC"
-virt-customize -a $FILE_PATH --timezone $TIMEZONE
+virt-customize -a "$FILE_PATH" --timezone $TIMEZONE
 
 echo "[  ROOT] set root password"
-virt-customize -a $FILE_PATH --root-password password:$ROOT_PASSWORD
+virt-customize -a "$FILE_PATH" --root-password password:$ROOT_PASSWORD
 
 echo "[   SSH] enable password auth to yes"
-virt-customize -a $FILE_PATH --run-command 'sed -i s/^PasswordAuthentication.*/PasswordAuthentication\ yes/ /etc/ssh/sshd_config'
+virt-customize -a "$FILE_PATH" --run-command 'sed -i s/^PasswordAuthentication.*/PasswordAuthentication\ yes/ /etc/ssh/sshd_config'
 echo "[   SSH] allow root login with ssh-key only"
-virt-customize -a $FILE_PATH --run-command 'sed -i s/^#PermitRootLogin.*/PermitRootLogin\ yes/ /etc/ssh/sshd_config'
+virt-customize -a "$FILE_PATH" --run-command 'sed -i s/^#PermitRootLogin.*/PermitRootLogin\ yes/ /etc/ssh/sshd_config'
 
 
 echo "[  DISK] - increase sda disk to 10G (original is ~2.2GB)"
-qemu-img resize $FILE_PATH 10G 
+qemu-img resize "$FILE_PATH" 10G
 echo "[  DISK] - change sda1 partition size"
-virt-customize -a $FILE_PATH --run-command "growpart /dev/sda 1 &&  resize2fs /dev/sda1"
+virt-customize -a "$FILE_PATH" --run-command "growpart /dev/sda 1 &&  resize2fs /dev/sda1"
 # virt-filesystems --long --parts --blkdevs -h -a $file_path
 
 echo "[   NET] - set net.ifnames=0 biosdevname=0"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --edit '/etc/default/grub:s/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0 /' \
   --run-command 'update-grub'
 
 echo "[   NET] - make cloud-init render network via ifupdown (eni renderer)"
 fetch_base 99-eni.cfg 99-eni.cfg
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command 'mkdir -p /etc/cloud/cloud.cfg.d' \
   --copy-in "${BUILD_TMP}/99-eni.cfg:/etc/cloud/cloud.cfg.d"
 # Unify on ifupdown: force cloud-init to render to /etc/network/interfaces(.d) via the eni renderer
@@ -113,7 +108,7 @@ virt-customize -a $FILE_PATH \
 
 echo "[   NET] - pre-seed eth0 DHCP default for boots with no cloud-init datasource"
 fetch_base 50-cloud-init 50-cloud-init
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command 'mkdir -p /etc/network/interfaces.d' \
   --copy-in "${BUILD_TMP}/50-cloud-init:/etc/network/interfaces.d"
 # Debian ds-identify DISABLES cloud-init when no datasource is found (default policy
@@ -130,18 +125,18 @@ virt-customize -a $FILE_PATH \
 
 
 echo "[   APT] Add agent to image"
-virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y'
+virt-customize -a "$FILE_PATH" --run-command 'apt-get update && apt-get upgrade -y'
 
 
 echo "[   APT] Uninstall some libs"
-virt-customize -a $FILE_PATH --uninstall netplan.io
-virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
-virt-customize -a $FILE_PATH --run-command 'apt-get autoremove -y'
-virt-customize -a $FILE_PATH --run-command 'dpkg --configure -a'
+virt-customize -a "$FILE_PATH" --uninstall netplan.io
+virt-customize -a "$FILE_PATH" --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
+virt-customize -a "$FILE_PATH" --run-command 'apt-get autoremove -y'
+virt-customize -a "$FILE_PATH" --run-command 'dpkg --configure -a'
 
 echo "[   DNS] Use resolvconf for /etc/resolv.conf (ifupdown/eni dns-nameservers + dhcpcd)"
-virt-customize -a $FILE_PATH --install resolvconf
-virt-customize -a $FILE_PATH --link /run/resolvconf/resolv.conf:/etc/resolv.conf
+virt-customize -a "$FILE_PATH" --install resolvconf
+virt-customize -a "$FILE_PATH" --link /run/resolvconf/resolv.conf:/etc/resolv.conf
 # systemd-resolved is purged: its if-up hook (/etc/network/if-up.d/resolved) exempts the loopback
 # interface, and cloud-init's eni renderer places dns-nameservers on lo -> DNS lost. resolvconf
 # DOES capture those (verified live: "resolv.conf from lo.inet") and has no lo exemption.
@@ -152,7 +147,7 @@ virt-customize -a $FILE_PATH --link /run/resolvconf/resolv.conf:/etc/resolv.conf
 
 
 echo "[   APT] Install basic tools"
-virt-customize -a $FILE_PATH --install ifenslave,unzip,zip,mc,screen,gcc,make,wget,curl,telnet,traceroute,tcptraceroute,sudo,gnupg,ca-certificates,nfs-common,aria2,qemu-utils
+virt-customize -a "$FILE_PATH" --install ifenslave,unzip,zip,mc,screen,gcc,make,wget,curl,telnet,traceroute,tcptraceroute,sudo,gnupg,ca-certificates,nfs-common,aria2,qemu-utils
 # ifenslave - allow to use ifconfig
 # unzip - allow support unzip ZIP files
 # zip - allow support zip ZIP files
@@ -168,7 +163,7 @@ virt-customize -a $FILE_PATH --install ifenslave,unzip,zip,mc,screen,gcc,make,wg
 # qemu-utils - allow support qemu
 
 echo "[   APT] Install basic tools - part 2"
-virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc
+virt-customize -a "$FILE_PATH" --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc
 # nano - edit files by nano
 # bzip2 - allow support bzip2
 # rsync - allow synchronisation files rsync
@@ -181,7 +176,7 @@ virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-trans
 # psmisc - allow support killall command
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,dialog,ethtool,cron
+virt-customize -a "$FILE_PATH" --install virtiofsd,net-tools,sysstat,iproute2,dialog,ethtool,cron
 # virtiofsd - Virtiofs is a shared filesystem designed for virtual environments
 # dialog  - required by the netui TUI (netui dies if missing)
 # ethtool   - used by netui status report (link/speed/SFP); sysfs fallback otherwise
@@ -191,14 +186,14 @@ virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,dial
 echo "[ NETUI] Download netui TUI into image"
 curl -fsSL "${LINUX4U_REPO}/bin/netui" -o "${BUILD_TMP}/netui" \
   || { echo "[  FAIL] fetch netui"; exit 1; }
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/netui:/usr/local/bin" \
   --run-command 'chmod 0755 /usr/local/bin/netui'
 echo "[    OK] /usr/local/bin/netui - installed"
 
 
 echo "[  WAIT] Mask systemd-networkd-wait-online (networkd is not the manager; avoids ~120s boot hang)"
-virt-customize -a $FILE_PATH --run-command 'systemctl mask systemd-networkd-wait-online.service'
+virt-customize -a "$FILE_PATH" --run-command 'systemctl mask systemd-networkd-wait-online.service'
 # systemd-networkd-wait-online.service is enabled by the genericcloud preset with the default
 # 120s timeout. Since networking is managed by ifupdown (cloud-init renders via the eni renderer),
 # systemd-networkd manages no links, so this waiter never sees an "online" link and blocks
@@ -207,20 +202,20 @@ virt-customize -a $FILE_PATH --run-command 'systemctl mask systemd-networkd-wait
 
 
 echo "[   SSH] Set sshd to allow all"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command "sed -i '/^sshd:/d' /etc/hosts.deny; echo 'sshd: ALL' >> /etc/hosts.deny" \
-  --run-command "sed -i '/^sshd:/d' /etc/hosts.allow; echo 'sshd: 10.0.0.0/8\nsshd: 172.16.0.0/12\nsshd: 192.168.0.0/16\n' >> /etc/hosts.allow"
+  --run-command "sed -i '/^sshd:/d' /etc/hosts.allow; echo 'sshd: 10.0.0.0/8\nsshd: 172.16.0.0/12\nsshd: 192.168.0.0/16\nsshd: 100.111.0.0/16\n' >> /etc/hosts.allow"
 
 
 echo "[ GUEST] Install guest agents"
-virt-customize -a $FILE_PATH --install qemu-guest-agent,open-vm-tools
+virt-customize -a "$FILE_PATH" --install qemu-guest-agent,open-vm-tools
 # qemu-guest-agent - allow support guest agent
 # open-vm-tools - allow support vmware tools
 
 
 # Fix .bashrc to enable colors and aliases
 echo "[BASHRC] Fix root .bashrc to enable colors and aliases"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
     --run-command "sed -i 's/^# export LS_OPTIONS=/export LS_OPTIONS=/' /root/.bashrc" \
     --run-command "sed -i 's/^# eval /eval /' /root/.bashrc" \
     --run-command "sed -i 's/^# alias ls=/alias ls=/' /root/.bashrc" \
@@ -230,7 +225,7 @@ virt-customize -a $FILE_PATH \
 # Create QuickScript folder
 fetch_base download_scripts.sh download_scripts.sh
 fetch_base quick_upgrade.sh quick_upgrade.sh
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
     --run-command 'mkdir -p /opt/scripts' \
     --copy-in "${BUILD_TMP}/download_scripts.sh:/opt/scripts" \
     --copy-in "${BUILD_TMP}/quick_upgrade.sh:/opt/scripts" \
@@ -240,15 +235,15 @@ echo "[    OK] /opt/scripts - created inside image"
 
 
 echo "[    ..] Add ssh-keygen -A to firstboot"
-virt-customize -a $FILE_PATH --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
+virt-customize -a "$FILE_PATH" --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
 echo "[    OK] Add ssh-keygen -A to firstboot - done"
 
 # Check if we are on proxmox
 if [ -d "/var/lib/vz/import/" ]; then
     echo "[    ..] Copy image to proxmox"
-    cp $FILE_PATH /var/lib/vz/import/
+    cp "$FILE_PATH" /var/lib/vz/import/
     if [ -n "$FINAL_NAME" ]; then
-        mv /var/lib/vz/import/$FILE_PATH /var/lib/vz/import/$FINAL_NAME
+        mv "/var/lib/vz/import/$FILE_PATH" "/var/lib/vz/import/$FINAL_NAME"
     fi
     echo "[    OK] Copy image to proxmox /var/lib/vz/import/ - done"
 else
@@ -259,6 +254,6 @@ if [ "$KEEP_FILE" = "true" ]; then
     echo "[    OK] Cleanup skipped"
 else
     echo "[    OK] Cleanup"
-    rm $FILE_PATH
+    rm "$FILE_PATH"
 fi
 exit 0

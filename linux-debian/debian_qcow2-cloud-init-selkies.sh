@@ -14,8 +14,6 @@
 ROOT_PASSWORD="root"
 TIMEZONE="UTC"
 DEBUG="${DEBUG:-false}"
-FINAL_NAME="${FINAL_NAME:-$FILE_PATH}"
-
 # Desktop user. Default is a normal user (recommended). LAB CORNER CASE: set
 # DESKTOP_USER=root to build a root desktop image -- the whole stack then runs as
 # root and the root-only fixes kick in (HOME=/root, system PulseAudio, chromium
@@ -78,13 +76,10 @@ esac
 
 echo "Selected version: $VERSION"
 echo "URL: $URL"
-if [ -z "$FINAL_NAME" ]; then
+if [ -z "${FINAL_NAME:-}" ]; then
     FINAL_NAME="debian-${VERSION}-amd64-cloud-init-selkies.qcow2"
-    echo "Final name: $FINAL_NAME"
-else
-    FINAL_NAME="$FILE_PATH"
-    echo "Final name: $FINAL_NAME"
 fi
+echo "Final name: $FINAL_NAME"
 
 
 # ### Set Debug in case of troubleshooting
@@ -131,39 +126,39 @@ render_tpl() {
 echo "[   ISO] Download Debian img if not exist"
 if [ ! -e "$FILE_PATH" ]; then
     echo "[    ..] File does not exist. Downloading..."
-    wget "$URL"
+    wget -O "$FILE_PATH" "$URL" || { echo "[  FAIL] download failed"; rm -f "$FILE_PATH"; exit 1; }
 else
     echo "[    OK] File already exists."
 fi
 
 
 echo "[    TZ] set timezone UTC"
-virt-customize -a $FILE_PATH --timezone $TIMEZONE
+virt-customize -a "$FILE_PATH" --timezone $TIMEZONE
 
 echo "[  ROOT] set root password"
-virt-customize -a $FILE_PATH --root-password password:$ROOT_PASSWORD
+virt-customize -a "$FILE_PATH" --root-password password:$ROOT_PASSWORD
 
 echo "[   SSH] enable password auth to yes"
-virt-customize -a $FILE_PATH --run-command 'sed -i s/^PasswordAuthentication.*/PasswordAuthentication\ yes/ /etc/ssh/sshd_config'
+virt-customize -a "$FILE_PATH" --run-command 'sed -i s/^PasswordAuthentication.*/PasswordAuthentication\ yes/ /etc/ssh/sshd_config'
 echo "[   SSH] allow root login with ssh-key only"
-virt-customize -a $FILE_PATH --run-command 'sed -i s/^#PermitRootLogin.*/PermitRootLogin\ yes/ /etc/ssh/sshd_config'
+virt-customize -a "$FILE_PATH" --run-command 'sed -i s/^#PermitRootLogin.*/PermitRootLogin\ yes/ /etc/ssh/sshd_config'
 
 
 # Desktop + Chromium + Selkies need more room than the headless ~2.2GB base.
 echo "[  DISK] - increase sda disk to 12G (original is ~2.2GB)"
-qemu-img resize $FILE_PATH 12G
+qemu-img resize "$FILE_PATH" 12G
 echo "[  DISK] - change sda1 partition size"
-virt-customize -a $FILE_PATH --run-command "growpart /dev/sda 1 &&  resize2fs /dev/sda1"
+virt-customize -a "$FILE_PATH" --run-command "growpart /dev/sda 1 &&  resize2fs /dev/sda1"
 
 
 echo "[   NET] - set net.ifnames=0 biosdevname=0"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --edit '/etc/default/grub:s/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0 /' \
   --run-command 'update-grub'
 
 echo "[   NET] - make cloud-init render network via ifupdown (eni renderer)"
 fetch_base 99-eni.cfg 99-eni.cfg
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command 'mkdir -p /etc/cloud/cloud.cfg.d' \
   --copy-in "${BUILD_TMP}/99-eni.cfg:/etc/cloud/cloud.cfg.d"
 # Unify on ifupdown: force cloud-init to render to /etc/network/interfaces(.d) via the eni renderer
@@ -171,7 +166,7 @@ virt-customize -a $FILE_PATH \
 
 echo "[   NET] - pre-seed eth0 DHCP default for boots with no cloud-init datasource"
 fetch_base 50-cloud-init 50-cloud-init
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command 'mkdir -p /etc/network/interfaces.d' \
   --copy-in "${BUILD_TMP}/50-cloud-init:/etc/network/interfaces.d"
 # Debian ds-identify DISABLES cloud-init when no datasource is found, and genericcloud ships no
@@ -183,7 +178,7 @@ virt-customize -a $FILE_PATH \
 
 
 echo "[   APT] Update + upgrade base image"
-virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y'
+virt-customize -a "$FILE_PATH" --run-command 'apt-get update && apt-get upgrade -y'
 
 
 # -----------------------------------------------------------------------------
@@ -197,10 +192,10 @@ virt-customize -a $FILE_PATH --run-command 'apt-get update && apt-get upgrade -y
 # jq + curl are needed for the GitHub API lookup; install them first.
 # -----------------------------------------------------------------------------
 echo "[SELKIE] Install fetch deps (jq, curl) early for build-time download"
-virt-customize -a $FILE_PATH --install jq,curl
+virt-customize -a "$FILE_PATH" --install jq,curl
 
 echo "[SELKIE] Download + unpack Selkies portable build into ${DESKTOP_HOME} (build time)"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command "set -eu; \
     SELKIES_VERSION=\"\$(curl -fsSL 'https://api.github.com/repos/selkies-project/selkies/releases/latest' | jq -r '.tag_name' | sed 's/[^0-9.\\-]*//g')\"; \
     echo \"Baking Selkies v\${SELKIES_VERSION} into image\"; \
@@ -213,25 +208,25 @@ echo "[    OK] Selkies baked into image"
 
 
 echo "[   APT] Uninstall some libs"
-virt-customize -a $FILE_PATH --uninstall netplan.io
-virt-customize -a $FILE_PATH --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
-virt-customize -a $FILE_PATH --run-command 'apt-get autoremove -y'
-virt-customize -a $FILE_PATH --run-command 'dpkg --configure -a'
+virt-customize -a "$FILE_PATH" --uninstall netplan.io
+virt-customize -a "$FILE_PATH" --run-command 'apt-get purge -y docker.io containerd runc php* systemd-resolved'
+virt-customize -a "$FILE_PATH" --run-command 'apt-get autoremove -y'
+virt-customize -a "$FILE_PATH" --run-command 'dpkg --configure -a'
 
 echo "[   DNS] Use resolvconf for /etc/resolv.conf (ifupdown/eni dns-nameservers + dhcpcd)"
-virt-customize -a $FILE_PATH --install resolvconf
-virt-customize -a $FILE_PATH --link /run/resolvconf/resolv.conf:/etc/resolv.conf
+virt-customize -a "$FILE_PATH" --install resolvconf
+virt-customize -a "$FILE_PATH" --link /run/resolvconf/resolv.conf:/etc/resolv.conf
 # The symlink MUST be set via --link (libguestfs swaps /etc/resolv.conf during --run-command).
 
 
 echo "[   APT] Install basic tools"
-virt-customize -a $FILE_PATH --install ifenslave,unzip,zip,mc,screen,gcc,make,wget,curl,telnet,traceroute,tcptraceroute,sudo,gnupg,ca-certificates,nfs-common,aria2,qemu-utils
+virt-customize -a "$FILE_PATH" --install ifenslave,unzip,zip,mc,screen,gcc,make,wget,curl,telnet,traceroute,tcptraceroute,sudo,gnupg,ca-certificates,nfs-common,aria2,qemu-utils
 
 echo "[   APT] Install basic tools - part 2"
-virt-customize -a $FILE_PATH --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc
+virt-customize -a "$FILE_PATH" --install nano,bzip2,rsync,openssh-server,apt-transport-https,gpg,htop,jq,yq,psmisc
 
 echo "[   APT] Install basic tools - part 3"
-virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,dialog,ethtool,cron
+virt-customize -a "$FILE_PATH" --install virtiofsd,net-tools,sysstat,iproute2,dialog,ethtool,cron
 
 
 # -----------------------------------------------------------------------------
@@ -243,12 +238,12 @@ virt-customize -a $FILE_PATH --install virtiofsd,net-tools,sysstat,iproute2,dial
 # found' at runtime because an apt-get error in --run-command was swallowed).
 # -----------------------------------------------------------------------------
 echo "[  DESK] Install minimal X11 stack + Xvfb (Selkies needs X.Org, NOT Wayland)"
-virt-customize -a $FILE_PATH --install \
+virt-customize -a "$FILE_PATH" --install \
   xserver-xorg-core,xinit,xvfb,dbus-x11,x11-utils,x11-xkb-utils,x11-xserver-utils,x11-apps,x11vnc
 # x11vnc - exposes the SAME Xvfb :99 over VNC (shared with Selkies), localhost-only
 
 echo "[  DESK] Install lightweight XFCE4 core (no goodies, no extras)"
-virt-customize -a $FILE_PATH --install \
+virt-customize -a "$FILE_PATH" --install \
   xfce4-session,xfwm4,xfdesktop4,xfce4-panel,xfce4-settings,xfce4-terminal,thunar,mousepad
 # xfce4-session/xfwm4/xfdesktop4/xfce4-panel/xfce4-settings - minimal usable XFCE
 # xfce4-terminal - terminal emulator
@@ -256,12 +251,12 @@ virt-customize -a $FILE_PATH --install \
 # mousepad       - simple text editor (package name is lowercase)
 
 echo "[  WEB ] Install Chromium browser (native Debian package; NOT Google Chrome)"
-virt-customize -a $FILE_PATH --install chromium
+virt-customize -a "$FILE_PATH" --install chromium
 # Debian package name is 'chromium' (verified, trixie). Native deb -> security
 # updates via standard Debian channels, no external Google repo to maintain.
 
 echo "[   SSL] Install ssl-cert (auto-generates the self-signed snakeoil cert+key)"
-virt-customize -a $FILE_PATH --install ssl-cert
+virt-customize -a "$FILE_PATH" --install ssl-cert
 # Installing ssl-cert generates, based on hostname:
 #   /etc/ssl/certs/ssl-cert-snakeoil.pem  (certificate)
 #   /etc/ssl/private/ssl-cert-snakeoil.key (private key, group ssl-cert, mode 0640)
@@ -280,7 +275,7 @@ if [ "$DESKTOP_USER" = "root" ]; then
   # Selkies tree under /root is already root-owned. Nothing to create here.
 else
   echo "[  USER] Create desktop user '${DESKTOP_USER}' (passwordless sudo, no root login for desktop)"
-  virt-customize -a $FILE_PATH \
+  virt-customize -a "$FILE_PATH" \
     --run-command "useradd -m -s /bin/bash ${DESKTOP_USER} || true" \
     --run-command "cp -n /etc/skel/.bashrc /etc/skel/.profile /etc/skel/.bash_logout /home/${DESKTOP_USER}/ 2>/dev/null || true" \
     --run-command "echo '${DESKTOP_USER}:${DESKTOP_PASSWORD}' | chpasswd" \
@@ -314,10 +309,10 @@ fi
 # 1) DESKTOP: Xvfb :99 + XFCE session. The display lives here, not in Selkies.
 # -----------------------------------------------------------------------------
 echo "[  DESK] Stage desktop start script (Xvfb :99 + XFCE)"
-virt-customize -a $FILE_PATH --run-command "mkdir -p /opt/selkies"
+virt-customize -a "$FILE_PATH" --run-command "mkdir -p /opt/selkies"
 
 render_tpl start-desktop.sh.tpl start-desktop.sh '${SELKIES_RES}'
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/start-desktop.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-desktop.sh"
 
@@ -325,7 +320,7 @@ echo "[  DESK] Stage xfce-session.service"
 render_tpl xfce-session.service.tpl xfce-session.service '${DESKTOP_USER}'
 # Rewrite /home/<user> -> $DESKTOP_HOME (no-op for normal users; -> /root for root).
 sed -i "s#/home/${DESKTOP_USER}#${DESKTOP_HOME}#g" "${BUILD_TMP}/xfce-session.service"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/xfce-session.service:/etc/systemd/system"
 
 
@@ -334,7 +329,7 @@ virt-customize -a $FILE_PATH \
 # -----------------------------------------------------------------------------
 echo "[SELKIE] Stage Selkies start script (attaches to :99)"
 render_tpl start-selkies.sh.tpl start-selkies.sh '${SELKIES_USER} ${SELKIES_PASSWORD}'
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/start-selkies.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-selkies.sh" \
   --run-command "chown -R ${DESKTOP_USER}:${DESKTOP_USER} /opt/selkies"
@@ -349,7 +344,7 @@ if [ "$DESKTOP_USER" = "root" ]; then
   sed -i '/^\[Unit\]/a After=pulseaudio-system.service' "${BUILD_TMP}/selkies.service"
   sed -i '/^\[Service\]/a Environment=PULSE_SERVER=unix:/run/pulse/native' "${BUILD_TMP}/selkies.service"
 fi
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/selkies.service:/etc/systemd/system"
 
 
@@ -362,7 +357,7 @@ virt-customize -a $FILE_PATH \
 #   with Selkies stopped entirely.
 # -----------------------------------------------------------------------------
 echo "[   VNC] Create VNC password file for ${DESKTOP_USER}"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command "mkdir -p ${DESKTOP_HOME}/.vnc" \
   --run-command "x11vnc -storepasswd '${VNC_PASSWORD}' ${DESKTOP_HOME}/.vnc/passwd" \
   --run-command "chown -R ${DESKTOP_USER}:${DESKTOP_USER} ${DESKTOP_HOME}/.vnc" \
@@ -371,7 +366,7 @@ virt-customize -a $FILE_PATH \
 echo "[   VNC] Stage x11vnc.service (depends on desktop, localhost-only)"
 render_tpl x11vnc.service.tpl x11vnc.service '${DESKTOP_USER}'
 sed -i "s#/home/${DESKTOP_USER}#${DESKTOP_HOME}#g" "${BUILD_TMP}/x11vnc.service"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/x11vnc.service:/etc/systemd/system"
 
 
@@ -388,8 +383,8 @@ virt-customize -a $FILE_PATH \
 # =============================================================================
 if [ "$DESKTOP_USER" = "root" ]; then
   echo "[  ROOT] System PulseAudio + virtual sink (selkies audio is mandatory)"
-  virt-customize -a $FILE_PATH --install pulseaudio,pulseaudio-utils
-  virt-customize -a $FILE_PATH \
+  virt-customize -a "$FILE_PATH" --install pulseaudio,pulseaudio-utils
+  virt-customize -a "$FILE_PATH" \
     --run-command "usermod -aG pulse-access root" \
     --run-command "grep -q virtual-speaker /etc/pulse/system.pa || printf '\n# selkies headless capture\nload-module module-null-sink sink_name=virtual-speaker sink_properties=device.description=virtual-speaker\nset-default-sink virtual-speaker\nset-default-source virtual-speaker.monitor\n' >> /etc/pulse/system.pa"
 
@@ -406,12 +401,12 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-  virt-customize -a $FILE_PATH \
+  virt-customize -a "$FILE_PATH" \
     --copy-in "${BUILD_TMP}/pulseaudio-system.service:/etc/systemd/system" \
     --run-command "systemctl enable pulseaudio-system.service"
 
   echo "[  ROOT] Chromium --no-sandbox drop-in (required to launch chromium as root)"
-  virt-customize -a $FILE_PATH \
+  virt-customize -a "$FILE_PATH" \
     --run-command "mkdir -p /etc/chromium.d" \
     --run-command "printf 'export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --test-type\"\n' > /etc/chromium.d/00-no-sandbox"
 fi
@@ -419,7 +414,7 @@ fi
 
 echo "[  MOTD] Stage live login banner (/etc/update-motd.d/99-motd-update)"
 render_tpl 99-motd-update.tpl 99-motd-update '${DESKTOP_USER} ${SELKIES_USER}'
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/99-motd-update:/etc/update-motd.d" \
   --run-command "chmod 0755 /etc/update-motd.d/99-motd-update"
 # Live MOTD: pam_motd runs /etc/update-motd.d/* on each login and caches to
@@ -428,14 +423,14 @@ virt-customize -a $FILE_PATH \
 
 # Enable all three at build time (baked-in Selkies needs no firstboot fetch).
 echo "[   SVC] Enable desktop + selkies + x11vnc services"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command 'systemctl enable xfce-session.service selkies.service x11vnc.service'
 
 
 echo "[ NETUI] Download netui TUI into image"
 curl -fsSL "${LINUX4U_REPO}/bin/netui" -o "${BUILD_TMP}/netui" \
   || { echo "[  FAIL] fetch netui"; exit 1; }
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/netui:/usr/local/bin" \
   --run-command 'chmod 0755 /usr/local/bin/netui'
 echo "[    OK] /usr/local/bin/netui - installed"
@@ -443,24 +438,24 @@ echo "[    OK] /usr/local/bin/netui - installed"
 echo "[DESKUI] Download deskui TUI into image"
 curl -fsSL "${LINUX4U_REPO}/bin/deskui" -o "${BUILD_TMP}/deskui" \
   || { echo "[  FAIL] fetch deskui"; exit 1; }
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/deskui:/usr/local/bin" \
   --run-command 'chmod 0755 /usr/local/bin/deskui'
 echo "[    OK] /usr/local/bin/deskui - installed"
 
 
 echo "[  WAIT] Mask systemd-networkd-wait-online (networkd is not the manager)"
-virt-customize -a $FILE_PATH --run-command 'systemctl mask systemd-networkd-wait-online.service'
+virt-customize -a "$FILE_PATH" --run-command 'systemctl mask systemd-networkd-wait-online.service'
 
 
 echo "[   SSH] Set sshd allow ranges"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --run-command "sed -i '/^sshd:/d' /etc/hosts.deny; echo 'sshd: ALL' >> /etc/hosts.deny" \
-  --run-command "sed -i '/^sshd:/d' /etc/hosts.allow; echo 'sshd: 10.0.0.0/8\nsshd: 172.16.0.0/12\nsshd: 192.168.0.0/16\n' >> /etc/hosts.allow"
+  --run-command "sed -i '/^sshd:/d' /etc/hosts.allow; echo 'sshd: 10.0.0.0/8\nsshd: 172.16.0.0/12\nsshd: 192.168.0.0/16\nsshd: 100.111.0.0/16\n' >> /etc/hosts.allow"
 
 
 echo "[ GUEST] Install guest agents"
-virt-customize -a $FILE_PATH --install qemu-guest-agent,open-vm-tools
+virt-customize -a "$FILE_PATH" --install qemu-guest-agent,open-vm-tools
 
 
 # Fix .bashrc to enable colors and aliases (root + desktop user).
@@ -468,7 +463,7 @@ virt-customize -a $FILE_PATH --install qemu-guest-agent,open-vm-tools
 # 'ls --color' is already active in the dircolors block, so for the user we only
 # enable the colored prompt and the ll/la/l aliases (skel uses '#alias', no space).
 echo "[BASHRC] Fix root + ${DESKTOP_USER} .bashrc to enable colors and aliases"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
     --run-command "sed -i 's/^# export LS_OPTIONS=/export LS_OPTIONS=/' /root/.bashrc" \
     --run-command "sed -i 's/^# eval /eval /' /root/.bashrc" \
     --run-command "sed -i 's/^# alias ls=/alias ls=/' /root/.bashrc" \
@@ -477,7 +472,7 @@ virt-customize -a $FILE_PATH \
 # The /etc/skel-seeded .bashrc tweaks only apply to a normal user's home; for
 # DESKTOP_USER=root the desktop home IS /root, already handled just above.
 if [ "$DESKTOP_USER" != "root" ]; then
-  virt-customize -a $FILE_PATH \
+  virt-customize -a "$FILE_PATH" \
     --run-command "sed -i 's/^#force_color_prompt=yes/force_color_prompt=yes/' /home/${DESKTOP_USER}/.bashrc" \
     --run-command "sed -i 's/^#alias ll=/alias ll=/' /home/${DESKTOP_USER}/.bashrc" \
     --run-command "sed -i 's/^#alias la=/alias la=/' /home/${DESKTOP_USER}/.bashrc" \
@@ -488,7 +483,7 @@ fi
 # Create QuickScript folder
 fetch_base download_scripts.sh download_scripts.sh
 fetch_base quick_upgrade.sh quick_upgrade.sh
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
     --run-command 'mkdir -p /opt/scripts' \
     --copy-in "${BUILD_TMP}/download_scripts.sh:/opt/scripts" \
     --copy-in "${BUILD_TMP}/quick_upgrade.sh:/opt/scripts" \
@@ -506,7 +501,7 @@ echo "[    OK] /opt/scripts - created inside image"
 # so NOTHING Selkies-related needs the network on first boot.
 # -----------------------------------------------------------------------------
 echo "[    ..] Configure firstboot commands"
-virt-customize -a $FILE_PATH \
+virt-customize -a "$FILE_PATH" \
   --firstboot-command 'ssh-keygen -A && systemctl enable ssh && systemctl restart ssh && systemctl disable --now apt-daily.timer apt-daily-upgrade.timer'
 echo "[    OK] firstboot configured"
 
@@ -514,9 +509,9 @@ echo "[    OK] firstboot configured"
 # Check if we are on proxmox
 if [ -d "/var/lib/vz/import/" ]; then
     echo "[    ..] Copy image to proxmox"
-    cp $FILE_PATH /var/lib/vz/import/
+    cp "$FILE_PATH" /var/lib/vz/import/
     if [ -n "$FINAL_NAME" ]; then
-        mv /var/lib/vz/import/$FILE_PATH /var/lib/vz/import/$FINAL_NAME
+        mv "/var/lib/vz/import/$FILE_PATH" "/var/lib/vz/import/$FINAL_NAME"
     fi
     echo "[    OK] Copy image to proxmox /var/lib/vz/import/ - done"
 else
@@ -527,6 +522,6 @@ if [ "$KEEP_FILE" = "true" ]; then
     echo "[    OK] Cleanup skipped"
 else
     echo "[    OK] Cleanup"
-    rm $FILE_PATH
+    rm "$FILE_PATH"
 fi
 exit 0
