@@ -14,6 +14,14 @@ WorkingDirectory=/home/${DESKTOP_USER}
 ExecStart=/opt/selkies/start-selkies.sh
 Restart=on-failure
 RestartSec=5
+# Scheduling: PulseAudio inside the stream logs "Failed to acquire high-priority
+# / real-time scheduling: Input/output error" at the default limits. Granting
+# them reduces encode jitter and audio glitching when the host is busy.
+Nice=-5
+LimitRTPRIO=infinity
+LimitNICE=-15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
 
 [Install]
 WantedBy=multi-user.target

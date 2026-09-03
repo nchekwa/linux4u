@@ -33,8 +33,33 @@ fi
 # Selkies HTTP basic-auth credentials (web UI login)
 SELKIES_USER="${SELKIES_USER:-selkies}"
 SELKIES_PASSWORD="${SELKIES_PASSWORD:-321selkies}"
-# Streamed virtual display geometry
-SELKIES_RES="${SELKIES_RES:-1920x1080}"
+# Streamed virtual display CEILING (not the working resolution): Selkies runs
+# with enable_resize=true and resizes the framebuffer DOWN to the client's window
+# size via xrandr. Xvfb's RANDR 'maximum' is fixed by this initial geometry, so a
+# client asking for more than this gets a scaled image instead.
+SELKIES_MAX_RES="${SELKIES_MAX_RES:-1920x1080}"
+SELKIES_RES="${SELKIES_RES:-$SELKIES_MAX_RES}"   # backwards-compat alias
+
+# Encoder defaults. 30 fps: software x264 on a GPU-less VM, and ximagesrc runs
+# with use-damage=0, so capture/colour-convert/encode all pay the full frame rate
+# whether or not the screen changed. congestion_control is forced on in
+# start-selkies.sh - it is the one encoder setting the web client cannot override.
+SELKIES_FRAMERATE="${SELKIES_FRAMERATE:-30}"
+SELKIES_VIDEO_BITRATE="${SELKIES_VIDEO_BITRATE:-8000}"
+SELKIES_AUDIO_BITRATE="${SELKIES_AUDIO_BITRATE:-64000}"
+
+# TURN. The Selkies 1.6.2 default (staticauth.openrelay.metered.ca) is DEAD -
+# verified from a built VM, UDP 443 and UDP 80 both time out, so zero relay
+# candidates are ever gathered. Leave empty rather than ship a corpse: Selkies
+# then logs "missing TURN server information" instead of silently failing.
+# The TURN server must be reachable FROM THE BROWSER, not from the VM (Selkies
+# serves the same rtc_config to the client, so one setting fixes both ends). If
+# the deployment forwards only TCP to the VM, use SELKIES_TURN_PROTOCOL=tcp.
+SELKIES_TURN_HOST="${SELKIES_TURN_HOST:-}"
+SELKIES_TURN_PORT="${SELKIES_TURN_PORT:-3478}"
+SELKIES_TURN_PROTOCOL="${SELKIES_TURN_PROTOCOL:-udp}"
+SELKIES_TURN_USERNAME="${SELKIES_TURN_USERNAME:-}"
+SELKIES_TURN_PASSWORD="${SELKIES_TURN_PASSWORD:-}"
 
 # VNC password (separate from the Linux user password; VNC uses its own scheme).
 # x11vnc shares the SAME :99 display as Selkies, bound to localhost only.
@@ -49,7 +74,11 @@ LINUX4U_REF="${LINUX4U_REF:-main}"
 LINUX4U_REPO="https://raw.githubusercontent.com/nchekwa/linux4u/${LINUX4U_REF}"
 
 # Exported for envsubst when rendering the .tpl payloads on the host.
-export DESKTOP_USER DESKTOP_HOME SELKIES_USER SELKIES_PASSWORD SELKIES_RES
+export DESKTOP_USER DESKTOP_HOME SELKIES_USER SELKIES_PASSWORD \
+       SELKIES_RES SELKIES_MAX_RES SELKIES_FRAMERATE \
+       SELKIES_VIDEO_BITRATE SELKIES_AUDIO_BITRATE \
+       SELKIES_TURN_HOST SELKIES_TURN_PORT SELKIES_TURN_PROTOCOL \
+       SELKIES_TURN_USERNAME SELKIES_TURN_PASSWORD
 
 # Check if version argument is provided
 if [ -z "$1" ]; then
@@ -311,7 +340,7 @@ fi
 echo "[  DESK] Stage desktop start script (Xvfb :99 + XFCE)"
 virt-customize -a "$FILE_PATH" --run-command "mkdir -p /opt/selkies"
 
-render_tpl start-desktop.sh.tpl start-desktop.sh '${SELKIES_RES}'
+render_tpl start-desktop.sh.tpl start-desktop.sh '${SELKIES_MAX_RES}'
 virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/start-desktop.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-desktop.sh"
@@ -328,7 +357,7 @@ virt-customize -a "$FILE_PATH" \
 # 2) SELKIES: attaches to the existing :99 (does NOT start Xvfb/XFCE anymore).
 # -----------------------------------------------------------------------------
 echo "[SELKIE] Stage Selkies start script (attaches to :99)"
-render_tpl start-selkies.sh.tpl start-selkies.sh '${SELKIES_USER} ${SELKIES_PASSWORD}'
+render_tpl start-selkies.sh.tpl start-selkies.sh '${SELKIES_USER} ${SELKIES_PASSWORD} ${SELKIES_FRAMERATE} ${SELKIES_VIDEO_BITRATE} ${SELKIES_AUDIO_BITRATE} ${SELKIES_TURN_HOST} ${SELKIES_TURN_PORT} ${SELKIES_TURN_PROTOCOL} ${SELKIES_TURN_USERNAME} ${SELKIES_TURN_PASSWORD}'
 virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/start-selkies.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-selkies.sh" \
