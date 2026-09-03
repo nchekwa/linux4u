@@ -3,3 +3,4 @@
 .nfs*
 # Ignore Git Commit Genie data
 .gitgenie/**
+internal-docs/
