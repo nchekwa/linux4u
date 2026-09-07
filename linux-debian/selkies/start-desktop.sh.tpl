@@ -43,9 +43,9 @@ rm -rf "${HOME}/.config/xfce4"
   done
   # Compositing costs redraws and damage events for no benefit on a stream
   xfconf-query -c xfwm4 -p /general/use_compositing -s false --create -t bool || true
-  # Flat backdrop: a photographic wallpaper is the worst case for H.264 with
-  # ximagesrc use-damage=0 and x264enc pass=cbr - constant residual noise burns
-  # bitrate on pixels nobody looks at. image-style=0 (none) + color-style=0 (solid).
+  # Flat backdrop: a photographic wallpaper is the worst case for a CBR H.264
+  # stream - constant residual noise burns bitrate on pixels nobody looks at.
+  # image-style=0 (none) + color-style=0 (solid).
   # The backdrop property path embeds the RANDR output name, so discover it
   # instead of hardcoding it.
   xfconf-query -c xfdesktop -l 2>/dev/null | grep '/workspace0/last-image$' | while read -r prop; do

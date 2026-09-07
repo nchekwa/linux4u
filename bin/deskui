@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # deskui - dialog(1) TUI to manage the root desktop-access services
-#          (selkies WebRTC + x11vnc) installed by setup-root-desktop-selkies-vnc.sh
+#          (selkies WebSocket + x11vnc) installed by setup-root-desktop-selkies-vnc.sh
 #
 # Two submenus: selkies / vnc. Each exposes systemctl management; selkies also
 # lets you change the basic-auth login + password, vnc the connection password.
@@ -102,7 +102,7 @@ selkies_change_pass() {
 selkies_menu() {
     local ch
     while true; do
-        ch=$(DLG --no-ok --cancel-label "Back" --title "Selkies (WebRTC :8080)" --menu "Login: $(selkies_get_user)" 14 64 3 \
+        ch=$(DLG --no-ok --cancel-label "Back" --title "Selkies (WebSocket :8080)" --menu "Login: $(selkies_get_user)" 14 64 3 \
             systemctl "Manage service (systemctl)" \
             user      "Change login (basic-auth)" \
             password  "Change password (basic-auth)") || return
@@ -148,7 +148,7 @@ command -v dialog >/dev/null 2>&1 || die "dialog not found (apt-get install dial
 
 while true; do
     CH=$(DLG --no-ok --cancel-label "Exit" --title "deskui" --menu "Select a service:" 12 56 2 \
-        selkies "Selkies WebRTC (web :8080)" \
+        selkies "Selkies WebSocket (web :8080)" \
         vnc     "VNC (x11vnc :5900)") || exit 0
     case $CH in
         selkies) selkies_menu ;;

@@ -2,7 +2,7 @@
 # debian_qcow2-selkies.sh
 # -----------------------------------------------------------------------------
 # Builds a Debian cloud qcow2 image preloaded with:
-#   - Selkies (X11) WebRTC HTML5 remote desktop, software x264 encoding
+#   - Selkies (X11) WebSocket HTML5 remote desktop, software H.264 encoding
 #   - XFCE4 lightweight desktop (no goodies, no games, no bloat)
 #   - Chromium browser + a minimal set of basic apps + terminal
 #   - Xvfb virtual X11 display (no hardware video encoder available)
@@ -40,26 +40,17 @@ SELKIES_PASSWORD="${SELKIES_PASSWORD:-321selkies}"
 SELKIES_MAX_RES="${SELKIES_MAX_RES:-1920x1080}"
 SELKIES_RES="${SELKIES_RES:-$SELKIES_MAX_RES}"   # backwards-compat alias
 
-# Encoder defaults. 30 fps: software x264 on a GPU-less VM, and ximagesrc runs
-# with use-damage=0, so capture/colour-convert/encode all pay the full frame rate
-# whether or not the screen changed. congestion_control is forced on in
-# start-selkies.sh - it is the one encoder setting the web client cannot override.
+# Encoder defaults. 30 fps: software H.264 (pixelflux) on a GPU-less VM.
+# congestion_control is forced on in start-selkies.sh - it is the one encoder
+# setting the web client cannot override.
 SELKIES_FRAMERATE="${SELKIES_FRAMERATE:-30}"
 SELKIES_VIDEO_BITRATE="${SELKIES_VIDEO_BITRATE:-8000}"
 SELKIES_AUDIO_BITRATE="${SELKIES_AUDIO_BITRATE:-64000}"
 
-# TURN. The Selkies 1.6.2 default (staticauth.openrelay.metered.ca) is DEAD -
-# verified from a built VM, UDP 443 and UDP 80 both time out, so zero relay
-# candidates are ever gathered. Leave empty rather than ship a corpse: Selkies
-# then logs "missing TURN server information" instead of silently failing.
-# The TURN server must be reachable FROM THE BROWSER, not from the VM (Selkies
-# serves the same rtc_config to the client, so one setting fixes both ends). If
-# the deployment forwards only TCP to the VM, use SELKIES_TURN_PROTOCOL=tcp.
-SELKIES_TURN_HOST="${SELKIES_TURN_HOST:-}"
-SELKIES_TURN_PORT="${SELKIES_TURN_PORT:-3478}"
-SELKIES_TURN_PROTOCOL="${SELKIES_TURN_PROTOCOL:-udp}"
-SELKIES_TURN_USERNAME="${SELKIES_TURN_USERNAME:-}"
-SELKIES_TURN_PASSWORD="${SELKIES_TURN_PASSWORD:-}"
+# NO TURN / STUN settings here on purpose: this image streams over WebSocket
+# only (see the [SELKIE] block). NAT traversal does not apply to a single
+# outbound TCP connection, and Selkies' turn_* options are never read in
+# websockets mode.
 
 # VNC password (separate from the Linux user password; VNC uses its own scheme).
 # x11vnc shares the SAME :99 display as Selkies, bound to localhost only.
@@ -76,13 +67,11 @@ LINUX4U_REPO="https://raw.githubusercontent.com/nchekwa/linux4u/${LINUX4U_REF}"
 # Exported for envsubst when rendering the .tpl payloads on the host.
 export DESKTOP_USER DESKTOP_HOME SELKIES_USER SELKIES_PASSWORD \
        SELKIES_RES SELKIES_MAX_RES SELKIES_FRAMERATE \
-       SELKIES_VIDEO_BITRATE SELKIES_AUDIO_BITRATE \
-       SELKIES_TURN_HOST SELKIES_TURN_PORT SELKIES_TURN_PROTOCOL \
-       SELKIES_TURN_USERNAME SELKIES_TURN_PASSWORD
+       SELKIES_VIDEO_BITRATE SELKIES_AUDIO_BITRATE
 
 # Check if version argument is provided
 if [ -z "$1" ]; then
-    echo "Usage: $0 <version:12|13>"
+    echo "Usage: $0 <version:13>"
     exit 1
 fi
 
@@ -90,8 +79,17 @@ VERSION="$1"
 
 case "$VERSION" in
     "12")
-        FILE_PATH="debian-12-genericcloud-amd64.qcow2"
-        URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+        # Selkies 2.x is installed from a HOST-built wheelhouse, and Python
+        # wheels are ABI-specific: bookworm ships Python 3.11, trixie 3.13.
+        # This build host's python3 produces wheels for its OWN version, so a
+        # deb12 image would get wheels it cannot import. Fail loudly instead of
+        # baking a broken desktop.
+        echo "[  FAIL] Debian 12 is not supported by the Selkies image."
+        echo "         Selkies 2.x needs a wheelhouse matching the target's"
+        echo "         Python ABI (deb12=3.11, deb13=3.13); this host is"
+        echo "         python3 $(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')."
+        echo "         Build with: $0 13"
+        exit 1
         ;;
     "13")
         FILE_PATH="debian-13-genericcloud-amd64.qcow2"
@@ -211,29 +209,98 @@ virt-customize -a "$FILE_PATH" --run-command 'apt-get update && apt-get upgrade 
 
 
 # -----------------------------------------------------------------------------
-# SELKIES DOWNLOAD AT BUILD TIME.
-# Done HERE - BEFORE the DNS/resolvconf block - on purpose: that block purges
-# systemd-resolved and swaps /etc/resolv.conf for a resolvconf symlink, which
-# can break name resolution inside the libguestfs appliance. At this point the
-# base image still has working DNS, so curl/wget succeed.
-# virt-customize has outgoing network during build (libguestfs appliance),
-# so the tarball is fetched now and baked into the image - nothing on firstboot.
-# jq + curl are needed for the GitHub API lookup; install them first.
+# SELKIES 2.x (WebSocket transport) - ASSEMBLED ON THE HOST, INJECTED OFFLINE.
+#
+# Why not releases/latest: that is v1.6.2, which is WebRTC-ONLY (it has no
+# --mode flag at all). WebRTC media is UDP/SRTP, so it cannot cross an HTTP
+# reverse proxy / Cloudflare orange-cloud, which carries only TCP on a fixed
+# port list -> the page loads and signalling succeeds, but the desktop never
+# paints. WebSocket mode exists only in 2.x, which upstream has never tagged.
+#
+# Why THIS commit: be53b2c is the last one before pixelflux~=2.1.0 /
+# pcmflux~=2.1.0 were pinned. Those versions do not exist on PyPI (only 2.0.0),
+# so HEAD of main cannot be installed at all.
+#
+# Why host-side: the guest NEVER runs pip/npm/curl against the network (the
+# [DNS] block's resolv.conf swap, plus appliance memory/time limits). Same
+# host-curl + --copy-in pattern as every other payload in this builder.
 # -----------------------------------------------------------------------------
-echo "[SELKIE] Install fetch deps (jq, curl) early for build-time download"
-virt-customize -a "$FILE_PATH" --install jq,curl
+SELKIES_COMMIT="${SELKIES_COMMIT:-be53b2c39670ccd1432fe50ebcd6d0ade72ce80a}"
 
-echo "[SELKIE] Download + unpack Selkies portable build into ${DESKTOP_HOME} (build time)"
+echo "[SELKIE] Host build deps (python3-pip, nodejs, npm)"
+sudo apt install python3-pip python3-venv nodejs npm -y \
+  || { echo "[  FAIL] host build deps"; exit 1; }
+
+# The wheelhouse is built by the HOST's python3 but installed by the GUEST's.
+# Binary wheels are ABI-tagged (cp313 etc.), so a mismatch produces an image
+# whose venv cannot install its own dependencies. Debian 13 ships Python 3.13.
+GUEST_PY="3.13"
+HOST_PY="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+if [ "$HOST_PY" != "$GUEST_PY" ]; then
+  echo "[  FAIL] host python3 is ${HOST_PY}, but the Debian ${VERSION} guest needs ${GUEST_PY}."
+  echo "         Binary wheels are ABI-specific - a ${HOST_PY} wheelhouse will not"
+  echo "         install inside the image. Build on a Debian ${VERSION} host/container."
+  exit 1
+fi
+
+echo "[SELKIE] Fetch Selkies source @ ${SELKIES_COMMIT}"
+curl -fsSL "https://github.com/selkies-project/selkies/archive/${SELKIES_COMMIT}.tar.gz" \
+  -o "${BUILD_TMP}/selkies-src.tar.gz" \
+  || { echo "[  FAIL] fetch selkies source"; exit 1; }
+mkdir -p "${BUILD_TMP}/src"
+tar -xzf "${BUILD_TMP}/selkies-src.tar.gz" -C "${BUILD_TMP}/src" --strip-components=1 \
+  || { echo "[  FAIL] unpack selkies source"; exit 1; }
+
+# Wheelhouse, in two steps because they are NOT interchangeable:
+#   1. pip wheel  -> builds the selkies wheel ITSELF from the source tarball.
+#      pip download resolves selkies' dependencies but never stores selkies
+#      (it is a URL/source, not an index package), so --no-index later fails
+#      with "No matching distribution found for selkies".
+#   2. pip download --only-binary=:all: -> the dependency tree, guaranteed not
+#      to compile (verified: everything incl. the pixelflux/pcmflux Rust
+#      extensions ships manylinux wheels).
+# setuptools is explicit: Python 3.12+ dropped distutils, which Selkies imports.
+#
+# MUST be "python3 -m pip", never bare "pip": on hosts where the `pip` on PATH
+# belongs to a DIFFERENT interpreter than `python3` (e.g. pip=3.12, python3=3.13)
+# the wheelhouse gets cp312 wheels that the guest's 3.13 venv cannot install.
+echo "[SELKIE] Build wheelhouse on host (no compilation)"
+python3 -m pip wheel --no-deps -w "${BUILD_TMP}/wheelhouse" \
+    "${BUILD_TMP}/selkies-src.tar.gz" \
+  || { echo "[  FAIL] wheelhouse (pip wheel selkies)"; exit 1; }
+python3 -m pip download --only-binary=:all: -d "${BUILD_TMP}/wheelhouse" \
+    "${BUILD_TMP}/selkies-src.tar.gz" setuptools \
+  || { echo "[  FAIL] wheelhouse (pip download deps)"; exit 1; }
+
+# Web client: NOT shipped in the source tarball (it is packaged into the wheel
+# only at upstream release time), so it must be built and passed via --web_root.
+# No upstream lockfile exists at this commit -> plain npm install, drift accepted.
+# The postbuild step (gendb.js) fetches the SDL gamepad DB; a failure here is
+# fatal on purpose rather than silently shipping a client without controllers.
+echo "[SELKIE] Build web client on host (vite)"
+( cd "${BUILD_TMP}/src/addons/selkies-web-core" \
+  && npm install --no-audit --no-fund \
+  && npm run build ) \
+  || { echo "[  FAIL] web client build"; exit 1; }
+[ -f "${BUILD_TMP}/src/addons/selkies-web-core/dist/index.html" ] \
+  || { echo "[  FAIL] web client dist/ missing"; exit 1; }
+
+echo "[SELKIE] Install Selkies into /opt/selkies/venv (guest, offline)"
+# libxkbcommon0: input_handler.py loads it via ctypes.CDLL("libxkbcommon.so.0")
+#                (the xkbcommon PYTHON package is not a dependency at this commit).
+# libpulse0:     pulsectl-asyncio / audio capture.
+virt-customize -a "$FILE_PATH" --install python3-venv,libxkbcommon0,libpulse0
 virt-customize -a "$FILE_PATH" \
-  --run-command "set -eu; \
-    SELKIES_VERSION=\"\$(curl -fsSL 'https://api.github.com/repos/selkies-project/selkies/releases/latest' | jq -r '.tag_name' | sed 's/[^0-9.\\-]*//g')\"; \
-    echo \"Baking Selkies v\${SELKIES_VERSION} into image\"; \
-    mkdir -p ${DESKTOP_HOME}; \
-    cd ${DESKTOP_HOME}; \
-    curl -fsSL \"https://github.com/selkies-project/selkies/releases/download/v\${SELKIES_VERSION}/selkies-gstreamer-portable-v\${SELKIES_VERSION}_amd64.tar.gz\" | tar -xzf -; \
-    echo \"\${SELKIES_VERSION}\" > /opt/selkies_version 2>/dev/null || true"
+  --run-command 'mkdir -p /opt/selkies' \
+  --copy-in "${BUILD_TMP}/wheelhouse:/opt/selkies" \
+  --copy-in "${BUILD_TMP}/src/addons/selkies-web-core/dist:/opt/selkies" \
+  --run-command 'mv /opt/selkies/dist /opt/selkies/web' \
+  --run-command 'python3 -m venv /opt/selkies/venv' \
+  --run-command '/opt/selkies/venv/bin/pip install --no-index --find-links=/opt/selkies/wheelhouse selkies setuptools' \
+  --run-command 'rm -rf /opt/selkies/wheelhouse' \
+  --run-command "echo '${SELKIES_COMMIT}' > /opt/selkies_version"
 # Ownership is fixed AFTER the desktop user is created (see [USER] block, chown).
-echo "[    OK] Selkies baked into image"
+echo "[    OK] Selkies 2.x (websockets) baked into image"
 
 
 echo "[   APT] Uninstall some libs"
@@ -326,7 +393,7 @@ fi
 #
 #   xfce-session.service  -> owns the desktop: starts Xvfb :99 + XFCE.
 #                            This is the FOUNDATION; it boots on its own.
-#   selkies.service       -> attaches to the existing :99 (WebRTC stream).
+#   selkies.service       -> attaches to the existing :99 (WebSocket stream).
 #   x11vnc.service        -> attaches to the existing :99 (VNC, localhost).
 #
 # Neither Selkies nor VNC owns the display anymore, so you can connect via
@@ -357,7 +424,7 @@ virt-customize -a "$FILE_PATH" \
 # 2) SELKIES: attaches to the existing :99 (does NOT start Xvfb/XFCE anymore).
 # -----------------------------------------------------------------------------
 echo "[SELKIE] Stage Selkies start script (attaches to :99)"
-render_tpl start-selkies.sh.tpl start-selkies.sh '${SELKIES_USER} ${SELKIES_PASSWORD} ${SELKIES_FRAMERATE} ${SELKIES_VIDEO_BITRATE} ${SELKIES_AUDIO_BITRATE} ${SELKIES_TURN_HOST} ${SELKIES_TURN_PORT} ${SELKIES_TURN_PROTOCOL} ${SELKIES_TURN_USERNAME} ${SELKIES_TURN_PASSWORD}'
+render_tpl start-selkies.sh.tpl start-selkies.sh '${SELKIES_USER} ${SELKIES_PASSWORD} ${SELKIES_FRAMERATE} ${SELKIES_VIDEO_BITRATE} ${SELKIES_AUDIO_BITRATE}'
 virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/start-selkies.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-selkies.sh" \
