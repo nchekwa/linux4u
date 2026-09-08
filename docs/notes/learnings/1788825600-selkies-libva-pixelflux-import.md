@@ -141,7 +141,10 @@ the old behaviour.
 
 ## Also fixed
 
-`SELKIES_MAX_RES` default raised `1920x1080` → `2560x1440`. Xvfb fixes its RANDR
+`SELKIES_MAX_RES` default raised `1920x1080` → `2560x1440`. **Superseded the same
+day:** 2560x1440 still clamped a 2880x1580 client, so the ceiling went on to
+`3840x2160` and `SELKIES_RES` was split back off as the starting mode — see
+[[1788912000-xvfb-randr-ceiling-clipped-desktop]]. Xvfb fixes its RANDR
 `maximum` from the initial `-screen` geometry and cannot grow, so a HiDPI client
 (2880x1800 panel → ~2880x1580 window) got a scaled image plus an
 `RRAddOutputMode BadMatch` burst per connect, leaving orphan modes behind.
@@ -160,7 +163,7 @@ journalctl -u selkies | grep 'pixelflux library found'          # must appear
 journalctl -u selkies | grep -c 'pixelflux library unavailable' # must be 0
 journalctl -u selkies | grep -ci 'PulseError'                   # must be 0
 systemctl is-active xfce-session selkies x11vnc pulseaudio-system
-DISPLAY=:99 xrandr | head -1                                    # maximum 2560x1440
+DISPLAY=:99 xrandr | head -1              # current 1920x1080, maximum 3840x2160
 journalctl -u selkies -f | grep 'SUCCESS: Capture started'      # the only real test
 ```
 

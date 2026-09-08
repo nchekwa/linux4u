@@ -65,7 +65,9 @@ geometry: adding a mode LARGER than it fails at `--addmode` with
 `X Error of failed request: BadMatch ... Major opcode 140 (RANDR)`.
 
 **So the resolution var is a CEILING, not a working resolution** — hence the rename to
-`SELKIES_MAX_RES` (with `SELKIES_RES` kept as a back-compat alias). Selkies resizes the
+`SELKIES_MAX_RES`. (`SELKIES_RES` was kept as a back-compat alias at the time; as of
+2026-09-08 it is a distinct knob again — the **starting** mode applied under the
+ceiling. See [[1788912000-xvfb-randr-ceiling-clipped-desktop]].) Selkies resizes the
 framebuffer down to the client's actual window, which is both sharper AND less encode
 work than a permanently oversized framebuffer.
 

@@ -320,8 +320,10 @@ GStreamer there.
 | `ximagesrc use-damage` | `0` | Full per-frame cost regardless of screen changes |
 
 `SELKIES_MAX_RES` is a **RANDR ceiling** set as the `-screen` geometry in Xvfb,
-not the working resolution. `enable_resize=true` scales down via `xrandr`; above
-the ceiling the image is scaled. (Xvfb 21.1.16 accepts
+not the working resolution. `enable_resize=true` scales down via `xrandr`; a
+client asking for MORE than the ceiling gets the desktop clipped to the ceiling
+with no error at all — see [[1788912000-xvfb-randr-ceiling-clipped-desktop]].
+(Xvfb 21.1.16 accepts
 `xrandr --newmode/--addmode/--output --mode` up to that ceiling — an earlier
 comment in the repository claiming otherwise was verified false.)
 
