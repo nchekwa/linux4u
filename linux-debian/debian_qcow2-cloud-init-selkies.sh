@@ -293,13 +293,60 @@ python3 -m pip download --only-binary=:all: -d "${BUILD_TMP}/wheelhouse" \
 # No upstream lockfile exists at this commit -> plain npm install, drift accepted.
 # The postbuild step (gendb.js) fetches the SDL gamepad DB; a failure here is
 # fatal on purpose rather than silently shipping a client without controllers.
+#
+# TWO addons are built, and both are required. This mirrors upstream
+# scripts/ci/build-web.sh, which is what produces the browser payload inside a
+# released wheel -- keep the two in step when bumping SELKIES_COMMIT.
 echo "[SELKIE] Build web client on host (vite)"
+
+# Order is forced: the dashboard's prebuild (copy-core.js) and postbuild
+# (copy-jsdb.js) lift the streaming core and the gamepad DB out of
+# selkies-web-core/dist, and hard-fail if it has not been built yet.
 ( cd "${BUILD_TMP}/src/addons/selkies-web-core" \
   && npm install --no-audit --no-fund \
   && npm run build ) \
-  || { echo "[  FAIL] web client build"; exit 1; }
-[ -f "${BUILD_TMP}/src/addons/selkies-web-core/dist/index.html" ] \
-  || { echo "[  FAIL] web client dist/ missing"; exit 1; }
+  || { echo "[  FAIL] web core build"; exit 1; }
+
+# selkies-web-core is the STREAMING CORE ALONE. Its dist/index.html is a
+# 128-byte stub holding one <script> tag: no <link rel="manifest">, no icons,
+# no apple-mobile-web-app meta. Shipping it as the web root gives a working
+# stream that can never be installed as a PWA -- the browser has nothing to
+# build an install entry from. The actual web client is selkies-dashboard,
+# which carries public/manifest.json and the icons.
+# SELKIES_INJECT=1 bakes the upload/download path into the bundle, as upstream does.
+( cd "${BUILD_TMP}/src/addons/selkies-dashboard" \
+  && npm install --no-audit --no-fund \
+  && SELKIES_INJECT=1 npm run build ) \
+  || { echo "[  FAIL] web dashboard build"; exit 1; }
+
+WEB_DIST="${BUILD_TMP}/src/addons/selkies-dashboard/dist"
+mkdir -p "${WEB_DIST}/src"
+cp "${BUILD_TMP}/src/addons/selkies-web-core/dist/selkies-core.js" "${WEB_DIST}/src/" \
+  || { echo "[  FAIL] copy selkies-core.js into dashboard dist"; exit 1; }
+cp "${BUILD_TMP}/src/addons/universal-touch-gamepad/universalTouchGamepad.js" "${WEB_DIST}/src/" \
+  || { echo "[  FAIL] copy universalTouchGamepad.js into dashboard dist"; exit 1; }
+
+# start_url is relative so an installed client launches back into the subfolder
+# it was served from, which an absolute "/" would discard.
+printf '%s' '{"name":"Selkies","short_name":"Selkies","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon-512.png","type":"image/png","sizes":"512x512"}],"start_url":"."}' \
+  > "${WEB_DIST}/manifest.json"
+# The plated icon belongs to the installed app alone; the dashboard's own
+# icon.png stays what the browser tab draws.
+cp "${BUILD_TMP}/src/docs/assets/logo/icon-512x512.png" "${WEB_DIST}/icon-512.png" \
+  || { echo "[  FAIL] copy PWA icon"; exit 1; }
+cp "${BUILD_TMP}/src/docs/assets/logo/favicon.ico" "${WEB_DIST}/favicon.ico" \
+  || { echo "[  FAIL] copy favicon"; exit 1; }
+
+# Guard the exact regression this block replaces. The old check was
+# `[ -f .../selkies-web-core/dist/index.html ]`, which passed happily on a
+# manifest-less stub: the build succeeded, the stream worked, and the defect
+# only ever surfaced in a browser as a missing install button.
+for _f in index.html manifest.json icon-512.png; do
+  [ -f "${WEB_DIST}/${_f}" ] \
+    || { echo "[  FAIL] web client dist/${_f} missing"; exit 1; }
+done
+grep -q 'rel="manifest"' "${WEB_DIST}/index.html" \
+  || { echo "[  FAIL] web client index.html carries no <link rel=manifest>"; exit 1; }
 
 echo "[SELKIE] Install Selkies into /opt/selkies/venv (guest, offline)"
 # Native runtime libraries the venv's compiled extensions dlopen. These are NOT
@@ -340,7 +387,7 @@ virt-customize -a "$FILE_PATH" --run-command \
 virt-customize -a "$FILE_PATH" \
   --run-command 'mkdir -p /opt/selkies' \
   --copy-in "${BUILD_TMP}/wheelhouse:/opt/selkies" \
-  --copy-in "${BUILD_TMP}/src/addons/selkies-web-core/dist:/opt/selkies" \
+  --copy-in "${WEB_DIST}:/opt/selkies" \
   --run-command 'mv /opt/selkies/dist /opt/selkies/web' \
   --run-command 'python3 -m venv /opt/selkies/venv' \
   --run-command '/opt/selkies/venv/bin/pip install --no-index --find-links=/opt/selkies/wheelhouse selkies setuptools' \
