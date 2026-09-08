@@ -1,5 +1,5 @@
 [Unit]
-Description=Selkies X11 remote desktop stream (software x264)
+Description=Selkies X11 remote desktop stream (WebSocket, software H.264)
 After=xfce-session.service
 Requires=xfce-session.service
 # No network-online.target dependency: this image manages networking via

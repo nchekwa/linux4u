@@ -8,7 +8,10 @@
 set -euo pipefail
 
 export DISPLAY=':99'
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+# NOT /tmp: root-owned 1777, which PulseAudio refuses as a runtime dir (see
+# start-selkies.sh). /run/selkies is this unit's own RuntimeDirectory=selkies,
+# owned by the desktop user.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/selkies}"
 
 # CEILING for the framebuffer, not the working resolution. Selkies resizes DOWN
 # to the client's window size on connect (enable_resize=true); this only caps how

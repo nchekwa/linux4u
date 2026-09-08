@@ -35,9 +35,16 @@ SELKIES_USER="${SELKIES_USER:-selkies}"
 SELKIES_PASSWORD="${SELKIES_PASSWORD:-321selkies}"
 # Streamed virtual display CEILING (not the working resolution): Selkies runs
 # with enable_resize=true and resizes the framebuffer DOWN to the client's window
-# size via xrandr. Xvfb's RANDR 'maximum' is fixed by this initial geometry, so a
-# client asking for more than this gets a scaled image instead.
-SELKIES_MAX_RES="${SELKIES_MAX_RES:-1920x1080}"
+# size via xrandr. Xvfb's RANDR 'maximum' is fixed by this initial geometry and
+# CANNOT be raised at runtime, so a client asking for more gets a scaled image
+# plus an RRAddOutputMode BadMatch burst on every connect (RRCreateMode succeeds,
+# attaching the oversized mode does not, leaving an orphan mode behind).
+# 2560x1440 covers the common HiDPI laptop window (a 2880x1800 panel at default
+# scaling asks for ~2880x1580) without paying for a 4K framebuffer. The only cost
+# is RAM: W*H*4 bytes, ~14 MB here vs ~33 MB at 3840x2160. A higher ceiling costs
+# no bitrate and no CPU at smaller window sizes, because Selkies scales DOWN.
+# For 4K clients build with: SELKIES_MAX_RES=3840x2160 ... 13
+SELKIES_MAX_RES="${SELKIES_MAX_RES:-2560x1440}"
 SELKIES_RES="${SELKIES_RES:-$SELKIES_MAX_RES}"   # backwards-compat alias
 
 # Encoder defaults. 30 fps: software H.264 (pixelflux) on a GPU-less VM.
@@ -286,10 +293,41 @@ echo "[SELKIE] Build web client on host (vite)"
   || { echo "[  FAIL] web client dist/ missing"; exit 1; }
 
 echo "[SELKIE] Install Selkies into /opt/selkies/venv (guest, offline)"
+# Native runtime libraries the venv's compiled extensions dlopen. These are NOT
+# discoverable from pip metadata - they are ELF NEEDED entries, so the ONLY way
+# to find them is `objdump -p`/`ldd` on the .so files (the smoke test below
+# enforces this automatically from now on).
+#
 # libxkbcommon0: input_handler.py loads it via ctypes.CDLL("libxkbcommon.so.0")
 #                (the xkbcommon PYTHON package is not a dependency at this commit).
-# libpulse0:     pulsectl-asyncio / audio capture.
+# libpulse0:     pulsectl-asyncio. (pcmflux bundles its OWN libpulse, but the
+#                Python-side pulsectl still needs the system one.)
+#
+# libva2 / libva-drm2 / libva-x11-2 - MANDATORY, and the non-obvious one:
+#   The pixelflux manylinux wheel bundles ffmpeg + x264 under pixelflux.libs/
+#   (RPATH $ORIGIN/pixelflux.libs) but deliberately does NOT bundle libva --
+#   hardware drivers must match the host. Its bundled libavcodec is built WITH
+#   VA-API, so libva.so.2 / libva-drm.so.2 / libva-x11.so.2 are resolved
+#   UNCONDITIONALLY at dlopen time, BEFORE any encoder is selected.
+#   A linker dependency is not a functional one: this is required even though
+#   the VM is GPU-less and --encoder=h264enc is pure software x264. Removing
+#   these because "we do not use hardware acceleration" breaks video entirely.
+#   Failure mode is nasty: `import pixelflux` raises ImportError, Selkies
+#   downgrades it to ONE startup WARNING, and then every client connect reports
+#   only "Cannot start capture: the pixelflux library failed to import" with no
+#   cause. The service stays active, HTTP returns 200, input works -- but no
+#   frame is ever sent and the browser sits on "Waiting for stream".
+# libgbm1 / libdrm2 / libpixman-1-0 - the rest of pixelflux's unbundled NEEDED set.
+# libice6 / libsm6 / libxext6      - pcmflux's unbundled NEEDED set.
 virt-customize -a "$FILE_PATH" --install python3-venv,libxkbcommon0,libpulse0
+# Separate --run-command with --no-install-recommends: libva-drm2 Recommends
+# va-driver-all, which drags in mesa-va-drivers + i965-va-driver +
+# intel-media-va-driver (~19.5 MB of GPU drivers) that are dead weight here.
+# virt-customize --install always installs Recommends, hence the explicit call.
+virt-customize -a "$FILE_PATH" --run-command \
+  'apt-get install -y --no-install-recommends \
+     libva2 libva-drm2 libva-x11-2 libgbm1 libdrm2 libpixman-1-0 \
+     libice6 libsm6 libxext6'
 virt-customize -a "$FILE_PATH" \
   --run-command 'mkdir -p /opt/selkies' \
   --copy-in "${BUILD_TMP}/wheelhouse:/opt/selkies" \
@@ -300,6 +338,36 @@ virt-customize -a "$FILE_PATH" \
   --run-command 'rm -rf /opt/selkies/wheelhouse' \
   --run-command "echo '${SELKIES_COMMIT}' > /opt/selkies_version"
 # Ownership is fixed AFTER the desktop user is created (see [USER] block, chown).
+
+# -----------------------------------------------------------------------------
+# SMOKE TEST - runs INSIDE the image, fails the build on a broken install.
+# This exists because a build can succeed end-to-end and still produce an image
+# that cannot render a single frame: `virt-customize --install` only reports
+# whether apt succeeded, never whether the venv's C extensions can actually be
+# loaded. A missing ELF NEEDED library (the libva case) is invisible until a
+# browser connects to a running VM.
+# Two layers, cheapest first:
+#   1. ldd sweep over every .so in the venv -> catches ANY unbundled library,
+#      including ones a future wheel bump introduces. Not just the ones we know.
+#   2. real import of the two capture engines -> catches breakage ldd cannot see.
+# -----------------------------------------------------------------------------
+echo "[SELKIE] Smoke test: native libs resolve + capture engines import"
+virt-customize -a "$FILE_PATH" --run-command \
+  'set -eu
+   miss=0
+   for so in $(find /opt/selkies/venv -name "*.so*" -type f); do
+     if ldd "$so" 2>/dev/null | grep -q "not found"; then
+       echo "MISSING NATIVE DEPS in $so"
+       ldd "$so" 2>/dev/null | grep "not found"
+       miss=1
+     fi
+   done
+   [ "$miss" -eq 0 ] || exit 1
+   /opt/selkies/venv/bin/python3 -c "import pixelflux, pcmflux, selkies"' \
+  || { echo "[  FAIL] Selkies native deps are broken inside the image."; \
+       echo "         Add the missing runtime packages to the --install list above"; \
+       echo "         (map SONAME -> package with: dpkg -S '*/libfoo.so.1')."; \
+       exit 1; }
 echo "[    OK] Selkies 2.x (websockets) baked into image"
 
 
@@ -433,13 +501,20 @@ virt-customize -a "$FILE_PATH" \
 echo "[SELKIE] Stage selkies.service (depends on desktop)"
 render_tpl selkies.service.tpl selkies.service '${DESKTOP_USER}'
 sed -i "s#/home/${DESKTOP_USER}#${DESKTOP_HOME}#g" "${BUILD_TMP}/selkies.service"
-if [ "$DESKTOP_USER" = "root" ]; then
-  # Selkies' audio pipeline is MANDATORY (its failure aborts the video stream,
-  # leaving the browser on "Waiting for stream"). Order after the system
-  # PulseAudio (created in the [ROOT] block) and point pulsesrc at its socket.
-  sed -i '/^\[Unit\]/a After=pulseaudio-system.service' "${BUILD_TMP}/selkies.service"
-  sed -i '/^\[Service\]/a Environment=PULSE_SERVER=unix:/run/pulse/native' "${BUILD_TMP}/selkies.service"
-fi
+# Point Selkies at the system PulseAudio (staged in the [AUDIO] block below).
+# Applies to EVERY desktop user, not just root: selkies.service has no
+# PAMName=login, so systemd-logind never creates /run/user/<uid> for it either
+# way, which rules out a per-user daemon regardless of who the user is.
+#
+# NOTE: audio is no longer "mandatory" the way the 1.x comment here claimed.
+# Since the 2.x/WebSocket migration audio and video are INDEPENDENT pipelines:
+# an audio failure raises, gets logged, and the video stream still starts
+# (verified on a live VM with PulseAudio completely dead). Without this block
+# the session is merely silent and spams a pulsectl stack trace on every
+# client connect -- it does NOT cause "Waiting for stream". That symptom is
+# almost always a missing native library for pixelflux (see the [SELKIE] block).
+sed -i '/^\[Unit\]/a After=pulseaudio-system.service' "${BUILD_TMP}/selkies.service"
+sed -i '/^\[Service\]/a Environment=PULSE_SERVER=unix:/run/pulse/native' "${BUILD_TMP}/selkies.service"
 virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/selkies.service:/etc/systemd/system"
 
@@ -467,27 +542,31 @@ virt-customize -a "$FILE_PATH" \
 
 
 # =============================================================================
-# ROOT CORNER CASE -- only when DESKTOP_USER=root. Fixes the two things that
-# break a root desktop (learned the hard way on a live box):
-#   1) PulseAudio: root cannot run a per-user daemon, and Selkies ALWAYS opens an
-#      audio pipeline on connect. With no PulseAudio that pipeline fails to reach
-#      PLAYING, which aborts the session BEFORE the video pipeline starts -> the
-#      browser hangs on "Waiting for stream". A system-mode daemon with a dummy
-#      null sink (no hardware needed) satisfies it; selkies.service already got
-#      PULSE_SERVER + After= above so pulsesrc talks to it.
-#   2) Chromium refuses to launch as root without --no-sandbox.
+# AUDIO -- for EVERY DESKTOP_USER, not just root.
+# Selkies opens an audio pipeline on every client connect; with no reachable
+# PulseAudio it throws a pulsectl stack trace in a loop and the session is
+# silent. System mode (the daemon drops privileges to the 'pulse' user) is used
+# because NO user here gets a logind session: selkies.service/xfce-session.service
+# have no PAMName=login, so /run/user/<uid> never exists and a per-user daemon is
+# impossible for a normal user exactly as it is for root. The null sink gives
+# PulseAudio a device with no hardware present.
+#
+# This used to live inside `if DESKTOP_USER = root`, which meant the DEFAULT
+# image (DESKTOP_USER=user) shipped with no audio server at all -- the fix had
+# been scoped to the condition it was debugged under rather than to its actual
+# cause. `libpulse0` was installed unconditionally, so the client library was
+# present with no server to talk to.
 # =============================================================================
-if [ "$DESKTOP_USER" = "root" ]; then
-  echo "[  ROOT] System PulseAudio + virtual sink (selkies audio is mandatory)"
-  virt-customize -a "$FILE_PATH" --install pulseaudio,pulseaudio-utils
-  virt-customize -a "$FILE_PATH" \
-    --run-command "usermod -aG pulse-access root" \
-    --run-command "grep -q virtual-speaker /etc/pulse/system.pa || printf '\n# selkies headless capture\nload-module module-null-sink sink_name=virtual-speaker sink_properties=device.description=virtual-speaker\nset-default-sink virtual-speaker\nset-default-source virtual-speaker.monitor\n' >> /etc/pulse/system.pa"
+echo "[ AUDIO] System PulseAudio + virtual sink (all desktop users)"
+virt-customize -a "$FILE_PATH" --install pulseaudio,pulseaudio-utils
+virt-customize -a "$FILE_PATH" \
+  --run-command "usermod -aG pulse-access ${DESKTOP_USER}" \
+  --run-command "grep -q virtual-speaker /etc/pulse/system.pa || printf '\n# selkies headless capture\nload-module module-null-sink sink_name=virtual-speaker sink_properties=device.description=virtual-speaker\nset-default-sink virtual-speaker\nset-default-source virtual-speaker.monitor\n' >> /etc/pulse/system.pa"
 
-  echo "[  ROOT] Stage pulseaudio-system.service (daemon drops to the 'pulse' user)"
-  cat > "${BUILD_TMP}/pulseaudio-system.service" <<'EOF'
+echo "[ AUDIO] Stage pulseaudio-system.service (daemon drops to the 'pulse' user)"
+cat > "${BUILD_TMP}/pulseaudio-system.service" <<'EOF'
 [Unit]
-Description=PulseAudio system daemon (root desktop image, selkies)
+Description=PulseAudio system daemon (headless selkies desktop)
 After=network.target
 
 [Service]
@@ -497,10 +576,17 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-  virt-customize -a "$FILE_PATH" \
-    --copy-in "${BUILD_TMP}/pulseaudio-system.service:/etc/systemd/system" \
-    --run-command "systemctl enable pulseaudio-system.service"
+virt-customize -a "$FILE_PATH" \
+  --copy-in "${BUILD_TMP}/pulseaudio-system.service:/etc/systemd/system" \
+  --run-command "systemctl enable pulseaudio-system.service"
 
+
+# =============================================================================
+# ROOT CORNER CASE -- only when DESKTOP_USER=root.
+# Chromium refuses to launch as root without --no-sandbox. (The PulseAudio half
+# of this block became unconditional -- see the [AUDIO] block above.)
+# =============================================================================
+if [ "$DESKTOP_USER" = "root" ]; then
   echo "[  ROOT] Chromium --no-sandbox drop-in (required to launch chromium as root)"
   virt-customize -a "$FILE_PATH" \
     --run-command "mkdir -p /etc/chromium.d" \

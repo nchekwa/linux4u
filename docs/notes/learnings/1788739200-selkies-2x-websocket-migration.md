@@ -81,6 +81,14 @@ Pin the untagged commit `be53b2c39670ccd1432fe50ebcd6d0ade72ce80a` and run with
   host Python == guest Python (Debian 13 = 3.13), and Debian 12 (3.11) is
   rejected outright.
 
+## Follow-up: this verification was INSUFFICIENT
+
+Everything below was run **on the build host**, not inside the image. The host
+already had `libva` installed, so `import pixelflux` succeeded there and failed
+in a clean image — the built VM served HTTP 200 and streamed no video at all.
+See [[1788825600-selkies-libva-pixelflux-import]]. The builder now runs an
+`ldd` sweep + import check **inside the guest** so this cannot recur.
+
 ## Verification performed
 
 Ran the real binary against a real `Xvfb :99`:

@@ -11,7 +11,13 @@
 set -euo pipefail
 
 export DISPLAY=':99'
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+# NOT /tmp: it is root-owned 1777, and PulseAudio correctly refuses a runtime dir
+# it does not own ("XDG_RUNTIME_DIR (/tmp) is not owned by us, but by uid 0"),
+# turning a clear "no runtime dir" condition into a misleading "connection
+# refused". This service has no PAMName=login, so logind never creates
+# /run/user/<uid>; /run/selkies is owned by the desktop user and comes from
+# RuntimeDirectory=selkies in xfce-session.service (Preserve=yes keeps it alive).
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/selkies}"
 
 # Wait until the desktop's :99 socket exists (defensive; systemd ordering also covers this)
 until [ -S "/tmp/.X11-unix/X99" ]; do sleep 0.5; done
