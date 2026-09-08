@@ -66,7 +66,13 @@ fi
 # alias is undocumented -- spell the real name.
 #
 # enable_resize=true: Xvfb DOES accept xrandr --newmode/--addmode/--output --mode,
-# up to the initial -screen geometry which start-desktop.sh sets to SELKIES_MAX_RES.
+# up to the initial -screen geometry which start-desktop.sh sets from
+# SELKIES_MAX_RES (the ceiling, default 3840x2160). The desktop BOOTS at
+# SELKIES_RES (default 1920x1080) instead, which start-desktop.sh applies under
+# that ceiling; the resize below then follows the client window. A client asking
+# for MORE than the ceiling is the one case that silently fails: the mode is
+# created but never attached, so the desktop stays smaller than the browser
+# viewport and its right/bottom edges (window buttons) fall outside it.
 #
 # congestion_control=true is the one encoder setting the client cannot override:
 # the runtime JSON config only overlays framerate/video_bitrate/audio_bitrate/

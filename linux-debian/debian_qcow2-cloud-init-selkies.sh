@@ -33,19 +33,28 @@ fi
 # Selkies HTTP basic-auth credentials (web UI login)
 SELKIES_USER="${SELKIES_USER:-selkies}"
 SELKIES_PASSWORD="${SELKIES_PASSWORD:-321selkies}"
-# Streamed virtual display CEILING (not the working resolution): Selkies runs
-# with enable_resize=true and resizes the framebuffer DOWN to the client's window
-# size via xrandr. Xvfb's RANDR 'maximum' is fixed by this initial geometry and
-# CANNOT be raised at runtime, so a client asking for more gets a scaled image
-# plus an RRAddOutputMode BadMatch burst on every connect (RRCreateMode succeeds,
-# attaching the oversized mode does not, leaving an orphan mode behind).
-# 2560x1440 covers the common HiDPI laptop window (a 2880x1800 panel at default
-# scaling asks for ~2880x1580) without paying for a 4K framebuffer. The only cost
-# is RAM: W*H*4 bytes, ~14 MB here vs ~33 MB at 3840x2160. A higher ceiling costs
-# no bitrate and no CPU at smaller window sizes, because Selkies scales DOWN.
-# For 4K clients build with: SELKIES_MAX_RES=3840x2160 ... 13
-SELKIES_MAX_RES="${SELKIES_MAX_RES:-2560x1440}"
-SELKIES_RES="${SELKIES_RES:-$SELKIES_MAX_RES}"   # backwards-compat alias
+# Two SEPARATE knobs, because Xvfb conflates them and only one is changeable
+# later:
+#
+#   SELKIES_MAX_RES - the RANDR CEILING. Xvfb takes it as the '-screen' geometry
+#     and pins 'maximum' to it FOREVER; it CANNOT be raised at runtime. A client
+#     asking for more gets a scaled image plus an RRAddOutputMode BadMatch burst
+#     on every connect (RRCreateMode succeeds, attaching the oversized mode does
+#     not, leaving an orphan mode behind). Default 3840x2160 so any client up to
+#     4K just works: a 2880x1800 HiDPI panel at default scaling asks for
+#     ~2880x1580 and was silently clamped by the old 2560x1440 ceiling, which
+#     shows up as a desktop wider than the browser viewport (window buttons on
+#     the right edge unreachable) with NO error anywhere the user can see.
+#     Cost is RAM only, W*H*4 bytes = ~33 MB, and a high ceiling costs no
+#     bitrate and no CPU at smaller windows because Selkies only scales DOWN.
+#
+#   SELKIES_RES - the STARTING mode, applied under the ceiling once X is up.
+#     Only what the desktop boots into before any client connects; Selkies then
+#     resizes to the client window (enable_resize=true). 1920x1080 keeps a
+#     headless/VNC session at a sane size instead of a 4K desktop nobody asked
+#     for.
+SELKIES_MAX_RES="${SELKIES_MAX_RES:-3840x2160}"
+SELKIES_RES="${SELKIES_RES:-1920x1080}"
 
 # Encoder defaults. 30 fps: software H.264 (pixelflux) on a GPU-less VM.
 # congestion_control is forced on in start-selkies.sh - it is the one encoder
@@ -475,7 +484,7 @@ fi
 echo "[  DESK] Stage desktop start script (Xvfb :99 + XFCE)"
 virt-customize -a "$FILE_PATH" --run-command "mkdir -p /opt/selkies"
 
-render_tpl start-desktop.sh.tpl start-desktop.sh '${SELKIES_MAX_RES}'
+render_tpl start-desktop.sh.tpl start-desktop.sh '${SELKIES_MAX_RES} ${SELKIES_RES}'
 virt-customize -a "$FILE_PATH" \
   --copy-in "${BUILD_TMP}/start-desktop.sh:/opt/selkies" \
   --run-command "chmod +x /opt/selkies/start-desktop.sh"

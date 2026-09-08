@@ -2,9 +2,10 @@
 # Foundation: a headless virtual X11 display (:99) running an XFCE session.
 # Independent of any remote-access client (Selkies / VNC attach to it later).
 #
-# Template: the SELKIES_MAX_RES placeholder is filled at build time by the builder
-# (envsubst). Runtime variables (${DISPLAY}, ${HOME}, ${XDG_RUNTIME_DIR}) are
-# left untouched because envsubst is called with a restricted variable list.
+# Template: the SELKIES_MAX_RES / SELKIES_RES placeholders are filled at build
+# time by the builder (envsubst). Runtime variables (${DISPLAY}, ${HOME},
+# ${XDG_RUNTIME_DIR}) are left untouched because envsubst is called with a
+# restricted variable list.
 set -euo pipefail
 
 export DISPLAY=':99'
@@ -16,11 +17,14 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/selkies}"
 # CEILING for the framebuffer, not the working resolution. Selkies resizes DOWN
 # to the client's window size on connect (enable_resize=true); this only caps how
 # large it may get. Xvfb's RANDR 'maximum' is fixed by this initial -screen geometry.
-RES='${SELKIES_MAX_RES}'
+MAX_RES='${SELKIES_MAX_RES}'
+# STARTING mode, applied under that ceiling once X is up (see below). Xvfb boots
+# the screen AT the ceiling, so without this the desktop would come up at 4K.
+START_RES='${SELKIES_RES}'
 
 # Virtual X11 framebuffer (no physical monitor / no GPU)
 exec_xvfb() {
-  Xvfb "${DISPLAY}" -screen 0 "${RES}x24" \
+  Xvfb "${DISPLAY}" -screen 0 "${MAX_RES}x24" \
     +extension COMPOSITE +extension DAMAGE +extension GLX +extension RANDR \
     +extension RENDER +extension MIT-SHM +extension XFIXES +extension XTEST \
     -nolisten tcp -ac -noreset >/tmp/Xvfb.log 2>&1 &
@@ -30,6 +34,38 @@ exec_xvfb
 echo 'Waiting for X socket'
 until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
 echo 'X server ready'
+
+# Drop from the ceiling to the starting mode BEFORE XFCE starts, so the session
+# lays its panels out for START_RES instead of the full framebuffer. Xvfb already
+# advertises common modes below 'maximum', but the exact geometry is not
+# guaranteed to be among them -- create it if missing. Non-fatal throughout: a
+# desktop at the ceiling still works, and Selkies resizes on connect anyway.
+set_start_mode() {
+  local out mode
+  out="$(xrandr --query | awk '/ connected/{print $1; exit}')" || return 0
+  [ -n "${out}" ] || return 0
+  mode="${START_RES}"
+
+  # Xvfb boots with ONLY the ceiling mode advertised, so the starting mode almost
+  # always has to be created first.
+  if ! xrandr --query | grep -qE "^[[:space:]]+${mode}[[:space:]]"; then
+    local w h
+    w="${mode%x*}"; h="${mode#*x}"
+    # Timings are deliberately fake: there is no monitor and no pixel clock to
+    # respect, so a dummy modeline is enough for RANDR to accept the geometry.
+    # Computed inline rather than via cvt(1) to avoid depending on it.
+    # shellcheck disable=SC2086  # deliberate word splitting: xrandr wants 12 args
+    xrandr --newmode "${mode}" 60.00 \
+      "${w}" "${w}" "${w}" "${w}" \
+      "${h}" "${h}" "${h}" "${h}" \
+      -hsync +vsync 2>/dev/null || true
+    xrandr --addmode "${out}" "${mode}" 2>/dev/null || true
+  fi
+
+  xrandr --output "${out}" --mode "${mode}" 2>/dev/null \
+    || echo "WARN: could not set ${mode} on ${out}, staying at ${MAX_RES}" >&2
+}
+[ "${START_RES}" = "${MAX_RES}" ] || set_start_mode
 
 # NOTE: this wipes the user's XFCE config on EVERY start, which is why the
 # settings block below cannot simply be baked into the image. Keep it if you want

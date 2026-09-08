@@ -127,13 +127,16 @@ selkies_menu() {
 # it is physically the Xvfb -screen geometry in start-desktop.sh: xfce-session
 # owns the display, selkies only attaches to it. Hence the desktop restart.
 #
-# This is the CEILING, not the working resolution: Selkies runs with
+# This edits MAX_RES=, the CEILING - not the working resolution and not the mode
+# the desktop boots into (START_RES=, left alone here). Selkies runs with
 # enable_resize=true and scales DOWN to the client's window. Xvfb fixes its RANDR
 # 'maximum' from the initial -screen geometry and cannot grow it at runtime, so a
-# client asking for more than this gets a scaled image. Cost of a higher ceiling
-# is RAM only (W*H*4 bytes) - it does not raise bitrate or CPU at smaller windows.
+# client asking for more than this gets a desktop wider than its viewport with the
+# window buttons off-screen, and no error message anywhere. Cost of a higher
+# ceiling is RAM only (W*H*4 bytes) - it does not raise bitrate or CPU at smaller
+# windows, so prefer raising it over debugging a clipped desktop.
 
-desktop_get_res() { grep -oP "(?<=^RES=')[^']+" "$DESKTOP_WRAPPER" 2>/dev/null | head -1; }
+desktop_get_res() { grep -oP "(?<=^MAX_RES=')[^']+" "$DESKTOP_WRAPPER" 2>/dev/null | head -1; }
 
 desktop_change_res() {
     local cur new
@@ -152,11 +155,11 @@ desktop_change_res() {
     DLG --title "Restart desktop?" --defaultno --yesno \
 "Change framebuffer ceiling ${cur:-?} -> ${new}?\n\nThis RESTARTS the desktop session:\n  - all open windows are lost\n  - XFCE settings are reset (start-desktop.sh\n    wipes ~/.config/xfce4 on every start)\n  - connected Selkies / VNC clients drop and\n    must reconnect\n\nProceed?" 16 64 || return
 
-    sed -i "s/^RES='[^']*'/RES='${new}'/" "$DESKTOP_WRAPPER" \
+    sed -i "s/^MAX_RES='[^']*'/MAX_RES='${new}'/" "$DESKTOP_WRAPPER" \
         || { DLG --title "Error" --msgbox "Failed to write $DESKTOP_WRAPPER" 9 60; return; }
 
     if [ "$(desktop_get_res)" != "$new" ]; then
-        DLG --title "Error" --msgbox "Could not update RES= in\n$DESKTOP_WRAPPER\n\nThe file may have an unexpected format." 10 60
+        DLG --title "Error" --msgbox "Could not update MAX_RES= in\n$DESKTOP_WRAPPER\n\nThe file may have an unexpected format." 10 60
         return
     fi
 
